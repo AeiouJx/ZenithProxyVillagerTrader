@@ -20,7 +20,7 @@ You need the following setup ingame:
 * `trader add <id> <profession> <inputItem1> <inputItem2> <outputItem> <inputItem1ChestPos> <inputItem2ChestPos> <outputChestPos>`
   * Two input items trades
 * `trader set help`
-  * Prints many additional trade configuration subcommands, like enchantments, prices, and restock settings
+  * Prints many additional trade configuration subcommands, like enchantments, price limits, and restock + deposit thresholds
 * `trader del <id>`
 * `trader clear`
 * `trader list`
@@ -28,9 +28,15 @@ You need the following setup ingame:
 
 ### Actions Loop
 
-This module is intended to be run continuously. 
+Each enabled trade is executed one at a time, in a never-ending loop.
 
-It will repeatedly attempt all configured trades one at a time.
+Input items are withdrawn and trade outputs are deposited as configured by their respective restock/deposit thresholds.
+
+A trade will interact with all loaded villagers in render distance matching the trade's set profession once.
+
+Matching villager offers are bought until inputs are exhausted or output slots are full.
+
+When no un-traded villagers remain, a configured `postTradeStore` action is executed before the next trade begins: either doing nothing (default), depositing inputs back to their chests, or depositing to a separate "overflow" chest
 
 ## Thanks
 

@@ -26,6 +26,21 @@ You need the following setup ingame:
 * `trader list`
 * `trader waitForInteractionTimeout <ticks>`
 
+### Display-frame setup (automatic configuration)
+
+`trader scan` reads item frames in the configured area centred on the bot and writes ordinary trade entries compatible with the original configuration format. The default area is 64×64 blocks; set it with `trader scanRange <blocks>`.
+
+* Put an **emerald** in an item frame attached directly to its restock container.
+* Optionally put a **book** in another item frame attached directly to its restock container.
+* Put each item you want to buy in an item frame with its output container exactly **two blocks below** the frame.
+* Run `trader scan`, then `trader list` to review the generated trades before enabling the module.
+
+Useful filters:
+
+* Diamond armour, diamond sword, and diamond tools are assigned to their vanilla villager professions automatically.
+* A displayed enchanted book must contain exactly one enchantment; its name and level become the generated trade ID and enchantment rule.
+* `trader restockWait <seconds>` controls how long the module waits after a full pass buys nothing.
+
 ### Actions Loop
 
 This module is intended to be run continuously. 

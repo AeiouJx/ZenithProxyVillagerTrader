@@ -53,6 +53,14 @@ public class VillagerTraderCommand extends Command {
                 "clear",
                 "list",
                 "set help",
+                "scan",
+                "scanRange <horizontalBlocks> [verticalBlocks]",
+                "prof list",
+                "prof <profession> on/off",
+                "prof <profession> addItem <item>",
+                "prof <profession> removeItem <item>",
+                "prof <profession> clear",
+                "restockWait <seconds>",
                 "waitForInteractTimeout <ticks>",
                 "logTradeStatusToDiscord on/off"
             )
@@ -68,6 +76,98 @@ public class VillagerTraderCommand extends Command {
                 c.getSource().getEmbed()
                     .title("Villager Trader " + toggleStrCaps(PLUGIN_CONFIG.enabled));
             }))
+            .then(literal("scan").executes(c -> {
+                final VillagerTrader.ScanResult[] result = new VillagerTrader.ScanResult[1];
+                inEventLoop(() -> result[0] = MODULE.get(VillagerTrader.class).scanItemFrames());
+                var scan = result[0];
+                c.getSource().getEmbed()
+                    .title(scan.problem() == null ? "Item Frame Scanned" : "Item Frame Scan Incomplete")
+                    .addField("Input Item Frames", scan.inputFrames())
+                    .addField("Output Item Frames", scan.outputFrames())
+                    .addField("Generated Trades", scan.generatedTrades())
+                    .addField("Ignored Item Frames", scan.ignoredFrames());
+                if (scan.problem() != null) c.getSource().getEmbed().description(scan.problem());
+                return scan.problem() == null ? OK : ERROR;
+            }))
+            .then(literal("scanRange")
+                .then(argument("horizontalBlocks", integer(1))
+                    .executes(c -> {
+                        PLUGIN_CONFIG.itemFrameScanHorizontalRangeBlocks = getInteger(c, "horizontalBlocks");
+                        c.getSource().getEmbed().title("Item Frame Scan Range Set").description((PLUGIN_CONFIG.itemFrameScanHorizontalRangeBlocks * 2) + " × " + (PLUGIN_CONFIG.itemFrameScanHorizontalRangeBlocks * 2) + " blocks");
+                        return OK;
+                    })
+                    .then(argument("verticalBlocks", integer(0)).executes(c -> {
+                        // verticalBlocks 作为 horizontalBlocks 的子节点，实现可选参数：scanRange <horizontalBlocks> [verticalBlocks]
+                        PLUGIN_CONFIG.itemFrameScanHorizontalRangeBlocks = getInteger(c, "horizontalBlocks");
+                        PLUGIN_CONFIG.itemFrameScanVerticalRangeBlocks = getInteger(c, "verticalBlocks");
+                        c.getSource().getEmbed().title("Item Frame Scan Range Set")
+                            .description((PLUGIN_CONFIG.itemFrameScanHorizontalRangeBlocks * 2) + " × " + (PLUGIN_CONFIG.itemFrameScanVerticalRangeBlocks * 2) + " × " + (PLUGIN_CONFIG.itemFrameScanHorizontalRangeBlocks * 2) + " blocks");
+                        return OK;
+                    }))))
+            .then(literal("prof")
+                .then(literal("list").executes(c -> {
+                    c.getSource().getEmbed()
+                        .title("Villager Trade Profiles")
+                        .description(printProfessions());
+                    c.getSource().getData().put("list", true);
+                    return OK;
+                }))
+                .then(argument("profession", enumStrings(VillagerProfession.values()))
+                    .executes(c -> {
+                        var prof = VillagerProfession.valueOf(getString(c, "profession").toUpperCase());
+                        c.getSource().getEmbed()
+                            .title("职业档案: " + prof.name().toLowerCase())
+                            .description(printProfession(prof));
+                        return OK;
+                    })
+                    .then(argument("profToggle", toggle()).executes(c -> {
+                        var prof = VillagerProfession.valueOf(getString(c, "profession").toUpperCase());
+                        var on = getToggle(c, "profToggle");
+                        if (on) {
+                            PLUGIN_CONFIG.enableProfession(prof);
+                        } else {
+                            PLUGIN_CONFIG.disableProfession(prof);
+                        }
+                        inEventLoop(() -> MODULE.get(VillagerTrader.class).onTradeListChange());
+                        c.getSource().getEmbed()
+                            .title("Profession " + toggleStrCaps(on) + ": " + prof.name().toLowerCase())
+                            .description(printProfession(prof));
+                        return OK;
+                    }))
+                    .then(literal("addItem").then(argument("item", item()).executes(c -> {
+                        var prof = VillagerProfession.valueOf(getString(c, "profession").toUpperCase());
+                        var itemName = getItem(c, "item").name();
+                        PLUGIN_CONFIG.addBuyItem(prof, itemName);
+                        inEventLoop(() -> MODULE.get(VillagerTrader.class).onTradeListChange());
+                        c.getSource().getEmbed()
+                            .title("购买物品已添加: " + itemName)
+                            .description(printProfession(prof));
+                        return OK;
+                    })))
+                    .then(literal("removeItem").then(argument("item", item()).executes(c -> {
+                        var prof = VillagerProfession.valueOf(getString(c, "profession").toUpperCase());
+                        var itemName = getItem(c, "item").name();
+                        PLUGIN_CONFIG.removeBuyItem(prof, itemName);
+                        inEventLoop(() -> MODULE.get(VillagerTrader.class).onTradeListChange());
+                        c.getSource().getEmbed()
+                            .title("购买物品已移除: " + itemName)
+                            .description(printProfession(prof));
+                        return OK;
+                    })))
+                    .then(literal("clear").executes(c -> {
+                        var prof = VillagerProfession.valueOf(getString(c, "profession").toUpperCase());
+                        PLUGIN_CONFIG.clearProfItems(prof);
+                        inEventLoop(() -> MODULE.get(VillagerTrader.class).onTradeListChange());
+                        c.getSource().getEmbed()
+                            .title("Buy Items Cleared: " + prof.name().toLowerCase())
+                            .description(printProfession(prof));
+                        return OK;
+                    }))))
+            .then(literal("restockWait").then(argument("seconds", integer(1)).executes(c -> {
+                PLUGIN_CONFIG.villagerTradeRestockWaitSeconds = getInteger(c, "seconds");
+                c.getSource().getEmbed().title("Villager Restock Wait Set").description(PLUGIN_CONFIG.villagerTradeRestockWaitSeconds + " seconds");
+                return OK;
+            })))
             .then(literal("add").then(argument("id", wordWithChars())
                 .then(argument("profession", enumStrings(VillagerProfession.values())).then(argument("inputItem1", item()).then(argument("buyItem", item()).then(argument("inputItem1Pos", blockPos()).then(argument("storeChestPos", blockPos()).executes(c -> {
                     var id = getString(c, "id");
@@ -151,6 +251,9 @@ public class VillagerTraderCommand extends Command {
                         "set <id> inputItem1Chest <x> <y> <z>",
                         "set <id> inputItem2Chest <x> <y> <z>",
                         "set <id> outputChest <x> <y> <z>",
+                        "set <id> restockChest <x> <y> <z>   (=输入1补货箱)",
+                        "set <id> restockChest2 <x> <y> <z>  (=输入2补货箱/书)",
+                        "set <id> storeChest <x> <y> <z>      (=卸货箱)",
                         "set <id> maxInput1PerTrade <count>",
                         "set <id> maxInput2PerTrade <count>",
                         "set <id> inputItem1RestockStacks <count>",
@@ -285,6 +388,23 @@ public class VillagerTraderCommand extends Command {
                             .description(printTrade(id, trade));
                         return OK;
                     })))
+                    .then(literal("restockChest").then(argument("pos", blockPos()).executes(c -> {
+                        var id = CustomStringArgumentType.getString(c, "id");
+                        if (!PLUGIN_CONFIG.trades.containsKey(id)) {
+                            c.getSource().getEmbed()
+                                .title("Trade ID Not Found")
+                                .addField("ID", id)
+                                .description(printAllTrades());
+                            c.getSource().getData().put("list", true);
+                            return ERROR;
+                        }
+                        var trade = PLUGIN_CONFIG.trades.get(id);
+                        trade.inputItem1Chest = getBlockPos(c, "pos");
+                        c.getSource().getEmbed()
+                            .title("Restock Chest (输入1补货) Set")
+                            .description(printTrade(id, trade));
+                        return OK;
+                    })))
                     .then(literal("inputItem2Chest").then(argument("inputItem2Chest", blockPos()).executes(c -> {
                         var id = CustomStringArgumentType.getString(c, "id");
                         if (!PLUGIN_CONFIG.trades.containsKey(id)) {
@@ -308,6 +428,23 @@ public class VillagerTraderCommand extends Command {
                             .description(printTrade(id, trade));
                         return OK;
                     })))
+                    .then(literal("restockChest2").then(argument("pos", blockPos()).executes(c -> {
+                        var id = CustomStringArgumentType.getString(c, "id");
+                        if (!PLUGIN_CONFIG.trades.containsKey(id)) {
+                            c.getSource().getEmbed()
+                                .title("Trade ID Not Found")
+                                .addField("ID", id)
+                                .description(printAllTrades());
+                            c.getSource().getData().put("list", true);
+                            return ERROR;
+                        }
+                        var trade = PLUGIN_CONFIG.trades.get(id);
+                        trade.inputItem2Chest = getBlockPos(c, "pos");
+                        c.getSource().getEmbed()
+                            .title("Restock Chest 2 (输入2补货) Set")
+                            .description(printTrade(id, trade));
+                        return OK;
+                    })))
                     .then(literal("outputChest").then(argument("outputChest", blockPos()).executes(c -> {
                         var id = CustomStringArgumentType.getString(c, "id");
                         if (!PLUGIN_CONFIG.trades.containsKey(id)) {
@@ -328,6 +465,23 @@ public class VillagerTraderCommand extends Command {
                         trade.outputChest = outputChest;
                         c.getSource().getEmbed()
                             .title("Output Chest Set")
+                            .description(printTrade(id, trade));
+                        return OK;
+                    })))
+                    .then(literal("storeChest").then(argument("pos", blockPos()).executes(c -> {
+                        var id = CustomStringArgumentType.getString(c, "id");
+                        if (!PLUGIN_CONFIG.trades.containsKey(id)) {
+                            c.getSource().getEmbed()
+                                .title("Trade ID Not Found")
+                                .addField("ID", id)
+                                .description(printAllTrades());
+                            c.getSource().getData().put("list", true);
+                            return ERROR;
+                        }
+                        var trade = PLUGIN_CONFIG.trades.get(id);
+                        trade.outputChest = getBlockPos(c, "pos");
+                        c.getSource().getEmbed()
+                            .title("Store Chest (卸货) Set")
                             .description(printTrade(id, trade));
                         return OK;
                     })))
@@ -572,7 +726,7 @@ public class VillagerTraderCommand extends Command {
                         .title("Trade ID Not Found")
                         .addField("ID", id)
                         .description(printAllTrades());
-                    c.getSource().getData().put("list", true);;
+                    c.getSource().getData().put("list", true);
                     return ERROR;
                 }
                 inEventLoop(() -> {
@@ -599,7 +753,7 @@ public class VillagerTraderCommand extends Command {
                     .description(printAllTrades());
                 c.getSource().getData().put("list", true);
             }))
-            .then(literal("waitForInteractTimeout").then(argument("ticks", time()).executes(c -> {;
+            .then(literal("waitForInteractTimeout").then(argument("ticks", time()).executes(c -> {
                 PLUGIN_CONFIG.waitForInteractTimeoutTicks = getInteger(c, "ticks");
                 c.getSource().getEmbed()
                     .title("Wait For Interact Timeout Set");
@@ -616,6 +770,9 @@ public class VillagerTraderCommand extends Command {
         if (!ctx.getData().containsKey("list")) {
             ctx.getEmbed()
                 .addField("Villager Trader", toggleStr(PLUGIN_CONFIG.enabled))
+                .addField("HorizontalBlocks", PLUGIN_CONFIG.itemFrameScanHorizontalRangeBlocks + " blocks")
+                .addField("VerticalRangeBlocks", PLUGIN_CONFIG.itemFrameScanVerticalRangeBlocks + " blocks")
+                .addField("RestockWaitSeconds", PLUGIN_CONFIG.villagerTradeRestockWaitSeconds + " ticks")
                 .addField("Wait For Interact Timeout", PLUGIN_CONFIG.waitForInteractTimeoutTicks + " ticks")
                 .addField("Log Trade Status To Discord", PLUGIN_CONFIG.logTradeStatusToDiscord);
         }
@@ -659,7 +816,16 @@ public class VillagerTraderCommand extends Command {
         if (!trade.enabled) {
             sb.append(" (disabled)");
         }
+        sb.append(" restock1 Pos=").append(formatPos(trade.inputItem1Chest));
+        if (trade.has2InputTrade()) {
+            sb.append(" restock2 Pos=").append(formatPos(trade.inputItem2Chest));
+        }
+        sb.append(" unload Pos=").append(formatPos(trade.outputChest));
         return sb.toString();
+    }
+
+    private String formatPos(com.zenith.mc.block.BlockPos pos) {
+        return "(" + pos.x() + ", " + pos.y() + ", " + pos.z() + ")";
     }
 
     public String printTradeEnchantments(VillagerTraderConfig.Trade trade) {
@@ -688,4 +854,49 @@ public class VillagerTraderCommand extends Command {
         }
         return sb.toString();
     }
+
+    public String printProfessions() {
+        StringBuilder sb = new StringBuilder();
+        for (var prof : VillagerProfession.values()) {
+            if (prof == VillagerProfession.NONE || prof == VillagerProfession.NITWIT) continue;
+            var items = PLUGIN_CONFIG.getEnabledItems(prof);
+            String cn = prof == VillagerProfession.NONE ? "" : PLUGIN_CONFIG.getProfession(prof) != null ? PLUGIN_CONFIG.getProfession(prof).displayName : "";
+            sb
+                .append(PLUGIN_CONFIG.isProfEnabled(prof) ? "[ON]" : "[OFF]")
+                .append(" ")
+                .append(prof.name().toLowerCase())
+                .append(" ")
+                .append(cn)
+                .append("  (")
+                .append(items.size())
+                .append(" 购买项)");
+            if (!items.isEmpty()) {
+                sb.append(": ");
+                for (int i = 0; i < items.size(); i++) {
+                    if (i > 0) sb.append(", ");
+                    sb.append(items.get(i));
+                }
+            }
+            sb.append("\n");
+        }
+        return sb.toString();
+    }
+
+    public String printProfession(VillagerProfession prof) {
+        var profile = PLUGIN_CONFIG.getProfession(prof);
+        String cn = profile == null ? "" : profile.displayName;
+        String workstation = profile == null ? "" : profile.workstation;
+        String workstationCn = profile == null ? "" : profile.workstationCn;
+        StringBuilder sb = new StringBuilder();
+        sb
+            .append("职业: ").append(prof.name().toLowerCase()).append(" (").append(cn).append(")").append("\n")
+            .append("工作台: ").append(workstation).append(" (").append(workstationCn).append(")").append("\n")
+            .append("状态: ").append(PLUGIN_CONFIG.isProfEnabled(prof) ? "启用" : "停用").append("\n")
+            .append("购买项 (").append(PLUGIN_CONFIG.getEnabledItems(prof).size()).append("): ").append("\n");
+        for (String item : PLUGIN_CONFIG.getEnabledItems(prof)) {
+            sb.append("  • ").append(item).append("\n");
+        }
+        return sb.toString();
+    }
+
 }

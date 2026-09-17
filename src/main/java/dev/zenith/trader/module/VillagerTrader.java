@@ -111,7 +111,7 @@ public class VillagerTrader extends Module {
     private void resetTradeCounter() {
         preTradeOutputCount = 0;
         preTradeInput1Count = 0;
-        preTradeInput2Count = 0;;
+        preTradeInput2Count = 0;
         outputBuyCount = 0;
         input1SellCount = 0;
         input2SellCount = 0;
@@ -459,7 +459,7 @@ public class VillagerTrader extends Module {
                     info("Sold {} {}", input1Sold, trade.inputItem1);
                     input1SellCount += input1Sold;
                     if (trade.has2InputTrade()) {
-                        var input2Sold = preTradeInput2Count - countItem(trade.getInputItem2().id());;
+                        var input2Sold = preTradeInput2Count - countItem(trade.getInputItem2().id());
                         info("Sold {} {}", input2Sold, trade.inputItem2);
                         input2SellCount += input2Sold;
                     }
@@ -676,7 +676,7 @@ public class VillagerTrader extends Module {
             case POST_TRADE_OVERFLOW_AWAIT_DEPOSIT -> {
                 if (postTradeDepositFuture.isCompleted()) {
                     var trade = tradeIterator.current();
-                    var inputItem1 = trade.getInputItem2();
+                    var inputItem1 = trade.getInputItem1();
                     if (countItem(inputItem1.id()) > 0) {
                         if (waitForInteractTimer.tick(PLUGIN_CONFIG.waitForInteractTimeoutTicks)) {
                             warn("Unable to fully deposit post trade input item 1, trying to continue anyway");

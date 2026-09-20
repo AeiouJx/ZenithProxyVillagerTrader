@@ -33,6 +33,7 @@ import it.unimi.dsi.fastutil.ints.IntList;
 import org.geysermc.mcprotocollib.protocol.data.ProtocolState;
 import org.geysermc.mcprotocollib.protocol.data.game.entity.metadata.MetadataTypes;
 import org.geysermc.mcprotocollib.protocol.data.game.entity.metadata.VillagerData;
+import org.geysermc.mcprotocollib.protocol.data.game.entity.player.PlayerState;
 import org.geysermc.mcprotocollib.protocol.data.game.entity.type.EntityType;
 import org.geysermc.mcprotocollib.protocol.data.game.inventory.ClickItemAction;
 import org.geysermc.mcprotocollib.protocol.data.game.inventory.ContainerType;
@@ -41,6 +42,7 @@ import org.geysermc.mcprotocollib.protocol.data.game.inventory.VillagerTrade;
 import org.geysermc.mcprotocollib.protocol.data.game.item.ItemStack;
 import org.geysermc.mcprotocollib.protocol.data.game.item.component.DataComponentTypes;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.inventory.ClientboundMerchantOffersPacket;
+import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundPlayerCommandPacket;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 
@@ -62,12 +64,19 @@ public class VillagerTrader extends Module {
     private PathingRequestFuture interactWithVillagerFuture = PathingRequestFuture.rejected;
     private ClientboundMerchantOffersPacket offersPacket = null;
     private RequestFuture purchaseFuture = RequestFuture.rejected;
+    private final IntList selectTradeQueue = new IntArrayList();
+    private int selectTradePos = 0;
+    private RequestFuture selectTradeFuture = RequestFuture.rejected;
+    private RequestFuture shiftResultFuture = RequestFuture.rejected;
     private PathingRequestFuture storePathingFuture = PathingRequestFuture.rejected;
     private RequestFuture storeDepositFuture = RequestFuture.rejected;
     private PathingRequestFuture postTradePathingFuture = PathingRequestFuture.rejected;
     private RequestFuture postTradeDepositFuture = RequestFuture.rejected;
     private final Timer waitForRestockTimer = Timers.tickTimer();
     private final Timer waitForInteractTimer = Timers.tickTimer();
+    private int sneakToggleTicks = 0;
+    private State sneakToggleRetryState = null;
+    private int openContainerRetryCount = 0;
     private int preTradeOutputCount = 0;
     private int preTradeInput1Count = 0;
     private int preTradeInput2Count = 0;
@@ -104,6 +113,13 @@ public class VillagerTrader extends Module {
         offersPacket = null;
         waitForInteractTimer.reset();
         waitForRestockTimer.reset();
+        sneakToggleTicks = 0;
+        sneakToggleRetryState = null;
+        openContainerRetryCount = 0;
+        selectTradeQueue.clear();
+        selectTradePos = 0;
+        selectTradeFuture = RequestFuture.rejected;
+        shiftResultFuture = RequestFuture.rejected;
         tradeIterator.reset();
         resetTradeCounter();
     }
@@ -163,6 +179,17 @@ public class VillagerTrader extends Module {
             state = State.ENTRYPOINT;
             return;
         }
+        if (sneakToggleTicks > 0) {
+            sneakToggleTicks--;
+            var entityId = CACHE.getPlayerCache().getEntityId();
+            Proxy.getInstance().getClient().sendAsync(new ServerboundPlayerCommandPacket(entityId, PlayerState.START_SNEAKING));
+            if (sneakToggleTicks == 0) {
+                Proxy.getInstance().getClient().sendAsync(new ServerboundPlayerCommandPacket(entityId, PlayerState.STOP_SNEAKING));
+                state = sneakToggleRetryState;
+                sneakToggleRetryState = null;
+            }
+            return;
+        }
         switch (state) {
             case ENTRYPOINT -> {
                 if (!tradeIterator.hasNext())
@@ -213,6 +240,7 @@ public class VillagerTrader extends Module {
                     var input1 = ItemRegistry.REGISTRY.get(trade.inputItem1);
                     var openContainer = CACHE.getPlayerCache().getInventoryCache().getOpenContainer();
                     if (openContainer.getContainerId() != 0) {
+                        openContainerRetryCount = 0;
                         var actions = Lists.newArrayList(
                             InventoryActionMacros.withdraw(
                                 openContainer.getContainerId(),
@@ -233,8 +261,7 @@ public class VillagerTrader extends Module {
                         setState(State.RESTOCK_INPUT_1_AWAIT_WITHDRAW);
                     } else {
                         if (waitForInteractTimer.tick(PLUGIN_CONFIG.waitForInteractTimeoutTicks)) {
-                            error("Timed out waiting for input 1 container to open");
-                            setState(State.RESTOCK_INPUT_1_AWAIT_WITHDRAW);
+                            retryOpenContainer(State.RESTOCK_INPUT_1_GO_TO_CHEST);
                         }
                     }
                 }
@@ -262,6 +289,7 @@ public class VillagerTrader extends Module {
                     var input2 = ItemRegistry.REGISTRY.get(trade.inputItem2);
                     var openContainer = CACHE.getPlayerCache().getInventoryCache().getOpenContainer();
                     if (openContainer.getContainerId() != 0) {
+                        openContainerRetryCount = 0;
                         var actions = Lists.newArrayList(
                             InventoryActionMacros.withdraw(
                                 openContainer.getContainerId(),
@@ -282,8 +310,7 @@ public class VillagerTrader extends Module {
                         setState(State.RESTOCK_INPUT_2_AWAIT_WITHDRAW);
                     } else {
                         if (waitForInteractTimer.tick(PLUGIN_CONFIG.waitForInteractTimeoutTicks)) {
-                            error("Timed out waiting for input 2 container to open");
-                            setState(State.RESTOCK_INPUT_2_AWAIT_WITHDRAW);
+                            retryOpenContainer(State.RESTOCK_INPUT_2_GO_TO_CHEST);
                         }
                     }
                 }
@@ -363,6 +390,7 @@ public class VillagerTrader extends Module {
                     if (offersPacket == null) {
                         if (waitForInteractTimer.tick(PLUGIN_CONFIG.waitForInteractTimeoutTicks)) {
                             setState(State.TRADING_INTERACT_WITH_VILLAGER);
+                            
                         }
                         return;
                     }
@@ -383,7 +411,9 @@ public class VillagerTrader extends Module {
                     tradeIterator.select(selectedTrade.get());
                     trade = tradeIterator.current();
                 }
-                List<InventoryAction> actions = Lists.newArrayList();
+                selectTradeQueue.clear();
+                List<InventoryAction> legacyActions = Lists.newArrayList();
+                boolean hasV2Trade = false;
                 for (int i = 0; i < trades.length; i++) {
                     var villagerTrade = trades[i];
                     if (villagerTrade.isTradeDisabled()) continue;
@@ -437,21 +467,25 @@ public class VillagerTrader extends Module {
                     }
 
                     if (canShiftClickPurchaseV2(villagerTrade, trade)) {
-                        actions.add(new SelectTrade(offersPacket.getContainerId(), i));
-                        actions.add(new ShiftMerchantResult(offersPacket.getContainerId(), villagerTrade.getOutput().getId()));
-                        info("shift clicking 1 time (single trade), trade count: {} inputCost1: {}", maxTradeCount, input1Cost);
+                        hasV2Trade = true;
+                        if (maxTradeCount > 0) {
+                            info("shift clicking 1 time (single trade), trade count: {} inputCost1: {}", maxTradeCount, input1Cost);
+                            selectTradeQueue.add(i);
+                        }
                     } else if (canShiftClickPurchase(villagerTrade)) {
+                        if (hasV2Trade) continue;
                         int outputsStackSize = ItemRegistry.REGISTRY.get(villagerTrade.getOutput().getId()).stackSize();
                         int maxTradesPerOutputStack = outputsStackSize / villagerTrade.getOutput().getAmount();
                         int maxTradesPerShiftClick = Math.min(maxTradesPerInputStack, maxTradesPerOutputStack);
                         int tradeCount = 0;
                         for (int j = 0; j < maxTradeCount; j+= maxTradesPerShiftClick) {
                             tradeCount++;
-                            actions.add(new SelectTrade(offersPacket.getContainerId(), i));
-                            actions.add(new ShiftClick(offersPacket.getContainerId(), 2, ShiftClickItemAction.LEFT_CLICK));
+                            legacyActions.add(new SelectTrade(offersPacket.getContainerId(), i));
+                            legacyActions.add(new ShiftClick(offersPacket.getContainerId(), 2, ShiftClickItemAction.LEFT_CLICK));
                         }
                         debug("shift clicking {} times, trade count: {} trades per shift click: {}", tradeCount, maxTradeCount, maxTradesPerShiftClick);
                     } else {
+                        if (hasV2Trade) continue;
                         /**
                          * If there are multiple enchanted books available to trade
                          * and one's price is lower than our current
@@ -469,23 +503,78 @@ public class VillagerTrader extends Module {
                         maxTradeCount = Math.min(maxTradeCount, emptySlots.size());
                         for (int j = 0; j < maxTradeCount; j++) {
                             int outputSlot = emptySlots.removeFirst();
-                            actions.add(new SelectTrade(offersPacket.getContainerId(), i));
-                            actions.add(new ClickItem(offersPacket.getContainerId(), 2, ClickItemAction.LEFT_CLICK));
-                            actions.add(new ClickItem(offersPacket.getContainerId(), outputSlot, ClickItemAction.LEFT_CLICK));
+                            legacyActions.add(new SelectTrade(offersPacket.getContainerId(), i));
+                            legacyActions.add(new ClickItem(offersPacket.getContainerId(), 2, ClickItemAction.LEFT_CLICK));
+                            legacyActions.add(new ClickItem(offersPacket.getContainerId(), outputSlot, ClickItemAction.LEFT_CLICK));
                         }
                         debug("click trading {} times", maxTradeCount);
                     }
                 }
-                actions.add(new CloseContainer(offersPacket.getContainerId()));
+                if (!selectTradeQueue.isEmpty()) {
+                    selectTradePos = 0;
+                    setState(State.TRADING_SELECT_TRADE);
+                    return;
+                }
+                legacyActions.add(new CloseContainer(offersPacket.getContainerId()));
                 purchaseFuture = INVENTORY.submit(InventoryActionRequest.builder()
                     .owner(this)
                     .priority(getPriority())
-                    .actions(actions)
+                    .actions(legacyActions)
                     .build());
                 preTradeInput1Count = countItem(trade.getInputItem1().id());
                 preTradeInput2Count = trade.has2InputTrade() ? countItem(trade.getInputItem2().id()) : 0;
                 preTradeOutputCount = countItem(trade.getOutputItem().id());
                 setState(State.TRADING_AWAIT_PURCHASE);
+            }
+            case TRADING_SELECT_TRADE -> {
+                var tradeIndex = selectTradeQueue.getInt(selectTradePos);
+                selectTradeFuture = INVENTORY.submit(InventoryActionRequest.builder()
+                    .owner(this)
+                    .priority(getPriority())
+                    .actions(List.of(new SelectTrade(offersPacket.getContainerId(), tradeIndex)))
+                    .build());
+                waitForInteractTimer.reset();
+                setState(State.TRADING_AWAIT_RESULT_CONFIRM);
+            }
+            case TRADING_AWAIT_RESULT_CONFIRM -> {
+                if (!selectTradeFuture.isCompleted()) return;
+                var trade = tradeIterator.current();
+                var openContainer = CACHE.getPlayerCache().getInventoryCache().getOpenContainer();
+                var resultItem = openContainer.getItemStack(2);
+                if (resultItem == Container.EMPTY_STACK) {
+                    if (waitForInteractTimer.tick(PLUGIN_CONFIG.waitForInteractTimeoutTicks)) {
+                        error("Result slot still empty after selecting offer {}, skipping purchase", selectTradeQueue.getInt(selectTradePos));
+                        finishPurchase();
+                    }
+                    return;
+                }
+                if (resultItem.getId() != trade.getOutputItem().id()) {
+                    if (waitForInteractTimer.tick(PLUGIN_CONFIG.waitForInteractTimeoutTicks)) {
+                        error("Result slot {} != expected {} after selecting offer {}, skipping purchase", resultItem.getId(), trade.getOutputItem().id(), selectTradeQueue.getInt(selectTradePos));
+                        finishPurchase();
+                    }
+                    return;
+                }
+                setState(State.TRADING_SHIFT_RESULT);
+            }
+            case TRADING_SHIFT_RESULT -> {
+                var trade = tradeIterator.current();
+                info("shift clicking 1 time (single trade)");
+                shiftResultFuture = INVENTORY.submit(InventoryActionRequest.builder()
+                    .owner(this)
+                    .priority(getPriority())
+                    .actions(List.of(new ShiftMerchantResult(offersPacket.getContainerId(), trade.getOutputItem().id())))
+                    .build());
+                setState(State.TRADING_AWAIT_SHIFT_RESULT);
+            }
+            case TRADING_AWAIT_SHIFT_RESULT -> {
+                if (!shiftResultFuture.isCompleted()) return;
+                selectTradePos++;
+                if (selectTradePos < selectTradeQueue.size()) {
+                    setState(State.TRADING_SELECT_TRADE);
+                } else {
+                    finishPurchase();
+                }
             }
             case TRADING_AWAIT_PURCHASE -> {
                 if (purchaseFuture.isCompleted()) {
@@ -521,10 +610,11 @@ public class VillagerTrader extends Module {
                     var openContainer = CACHE.getPlayerCache().getInventoryCache().getOpenContainer();
                     if (openContainer.getContainerId() == 0) {
                         if (waitForInteractTimer.tick(PLUGIN_CONFIG.waitForInteractTimeoutTicks)) {
-                            setState(State.STORE_GO_TO_CHEST);
+                            retryOpenContainer(State.STORE_GO_TO_CHEST);
                         }
                         return;
                     }
+                    openContainerRetryCount = 0;
                     var outputItem = trade.getOutputItem();
                     var actions = Lists.newArrayList(
                         InventoryActionMacros.deposit(
@@ -589,10 +679,11 @@ public class VillagerTrader extends Module {
                     var openContainer = CACHE.getPlayerCache().getInventoryCache().getOpenContainer();
                     if (openContainer.getContainerId() == 0) {
                         if (waitForInteractTimer.tick(PLUGIN_CONFIG.waitForInteractTimeoutTicks)) {
-                            setState(State.POST_TRADE_INPUT_1_GO_TO);
+                            retryOpenContainer(State.POST_TRADE_INPUT_1_GO_TO);
                         }
                         return;
                     }
+                    openContainerRetryCount = 0;
                     var actions = Lists.newArrayList(
                         InventoryActionMacros.deposit(
                             openContainer.getContainerId(),
@@ -640,10 +731,11 @@ public class VillagerTrader extends Module {
                     var openContainer = CACHE.getPlayerCache().getInventoryCache().getOpenContainer();
                     if (openContainer.getContainerId() == 0) {
                         if (waitForInteractTimer.tick(PLUGIN_CONFIG.waitForInteractTimeoutTicks)) {
-                            setState(State.POST_TRADE_INPUT_2_GO_TO);
+                            retryOpenContainer(State.POST_TRADE_INPUT_2_GO_TO);
                         }
                         return;
                     }
+                    openContainerRetryCount = 0;
                     var actions = Lists.newArrayList(
                         InventoryActionMacros.deposit(
                             openContainer.getContainerId(),
@@ -686,10 +778,11 @@ public class VillagerTrader extends Module {
                     var openContainer = CACHE.getPlayerCache().getInventoryCache().getOpenContainer();
                     if (openContainer.getContainerId() == 0) {
                         if (waitForInteractTimer.tick(PLUGIN_CONFIG.waitForInteractTimeoutTicks)) {
-                            setState(State.POST_TRADE_OVERFLOW_GO_TO);
+                            retryOpenContainer(State.POST_TRADE_OVERFLOW_GO_TO);
                         }
                         return;
                     }
+                    openContainerRetryCount = 0;
                     var inputItem1 = trade.getInputItem1();
                     var actions = Lists.newArrayList(
                         InventoryActionMacros.deposit(
@@ -806,6 +899,37 @@ public class VillagerTrader extends Module {
     private void setState(State newState) {
         debug("State change: {} -> {}", state, newState);
         this.state = newState;
+    }
+
+    private void finishPurchase() {
+        selectTradeQueue.clear();
+        var trade = tradeIterator.current();
+        purchaseFuture = INVENTORY.submit(InventoryActionRequest.builder()
+            .owner(this)
+            .priority(getPriority())
+            .actions(List.of(new CloseContainer(offersPacket.getContainerId())))
+            .build());
+        preTradeInput1Count = countItem(trade.getInputItem1().id());
+        preTradeInput2Count = trade.has2InputTrade() ? countItem(trade.getInputItem2().id()) : 0;
+        preTradeOutputCount = countItem(trade.getOutputItem().id());
+        setState(State.TRADING_AWAIT_PURCHASE);
+    }
+
+    private void retryOpenContainer(final State retryState) {
+        openContainerRetryCount++;
+        if (openContainerRetryCount > 5) {
+            error("Failed to open container after {} attempts, skipping current trade", openContainerRetryCount);
+            openContainerRetryCount = 0;
+            tradeIterator.next();
+            resetTradeCounter();
+            waitForInteractTimer.reset();
+            setState(State.ENTRYPOINT);
+            return;
+        }
+        waitForInteractTimer.reset();
+        sneakToggleTicks = 3;
+        sneakToggleRetryState = retryState;
+        error("Timed out waiting for container to open, toggling sneak and retrying (attempt {})", openContainerRetryCount);
     }
 
     private Optional<EntityLiving> nextVillager(final VillagerTraderConfig.Trade trade) {
@@ -992,6 +1116,10 @@ public class VillagerTrader extends Module {
         TRADING_INTERACT_WITH_VILLAGER,
         TRADING_AWAIT_INTERACT_WITH_VILLAGER,
         TRADING_TRY_START_PURCHASE,
+        TRADING_SELECT_TRADE,
+        TRADING_AWAIT_RESULT_CONFIRM,
+        TRADING_SHIFT_RESULT,
+        TRADING_AWAIT_SHIFT_RESULT,
         TRADING_AWAIT_PURCHASE,
         // todo: states to compact stackable items in inventory with shift clicks
         STORE_GO_TO_CHEST,

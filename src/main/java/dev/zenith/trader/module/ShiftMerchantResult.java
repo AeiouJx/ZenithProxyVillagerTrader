@@ -36,13 +36,14 @@ public class ShiftMerchantResult implements InventoryAction {
         var container = CACHE.getPlayerCache().getInventoryCache().getOpenContainer();
         var itemStack = container.getItemStack(2);
         if (isStackEmpty(itemStack)) {
-            CLIENT_LOG.debug("ShiftMerchantResult: result slot empty, skipping (select not confirmed)");
+            CLIENT_LOG.info("ShiftMerchantResult: result slot empty, skipping (select not confirmed)");
             return null;
         }
         if (itemStack.getId() != expectedItemId) {
-            CLIENT_LOG.debug("ShiftMerchantResult: result slot {} != expected {}, skipping", itemStack.getId(), expectedItemId);
+            CLIENT_LOG.info("ShiftMerchantResult: result slot {} != expected {}, skipping", itemStack.getId(), expectedItemId);
             return null;
         }
+        CLIENT_LOG.info("ShiftMerchantResult: shifting result slot id {}, expected {}", itemStack.getId(), expectedItemId);
         Int2ObjectMap<ItemStack> changedSlots = new Int2ObjectArrayMap<>();
         return new ServerboundContainerClickPacket(
             containerId,

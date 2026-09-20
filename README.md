@@ -48,12 +48,16 @@ The biggest change is a new fast-purchase path for enchanted books:
   offers whose **enchantment and level exactly match** the configured target
   (`sameEnchantedBook()`), so a librarian offering several different enchanted books is still
   considered safe to shift-click once: only the selected book can be bought.
-- `ShiftMerchantResult` performs the actual click with an extra guard: before sending the
-  shift-click it verifies that the merchant result slot actually contains the selected target
-  item. On race conditions where the `SelectTrade` packet has not yet been reflected in the
-  container cache (the result slot would otherwise show the default/highlighted offer, such as
-  a librarian's bookshelf or lantern), the click is safely skipped instead of buying the wrong
-  item. A later pass retries the purchase automatically.
+- `ShiftMerchantResult` performs the shift-click with a two-stage handshake that physically
+  eliminates the purchase race condition:
+  1. `SelectTrade` is sent and the module waits until the container cache actually reflects the
+     selected target item in the merchant result slot (`TRADING_AWAIT_RESULT_CONFIRM`) before
+     shifting.
+  2. Only then is `ShiftMerchantResult` submitted. It logs the result slot id at *info* level,
+     and as a last line of defense skips (instead of buying) if the result slot is empty or
+     still shows a different item such as a librarian's bookshelf/lantern.
+- If the result slot is never confirmed within the interaction timeout, the offer is skipped
+  and the purchase finishes without clicking.
 - If a villager really does have multiple offers with the *same* enchant and level, the module
   falls back to the **upstream** logic: batched shift-clicks, then per-trade left-clicks.
 
@@ -69,6 +73,17 @@ The biggest change is a new fast-purchase path for enchanted books:
 
 - `findMatchingTrade` resolves the configured trade to the actual offer on a villager by
   profession, output item, enchantments and inputs, and selects it before purchasing.
+
+### Robust container opening (sneak-toggle retry)
+
+- Some servers occasionally fail to open a container even though the right-click reaches the
+  block (players can work around it by crouching and standing back up). If a configured chest
+  does not open within the interaction timeout, the module now simulates exactly that workaround:
+  it sends `START_SNEAKING`, holds it for a few ticks, sends `STOP_SNEAKING`, and retries the
+  interaction automatically.
+- This applies to every container the module opens (restock chests, output/storage chests, and
+  post-trade deposit chests). After five consecutive failures the current trade is skipped to
+  avoid spinning forever on a broken/unreachable chest.
 
 ## Thanks
 

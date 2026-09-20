@@ -69,21 +69,33 @@ The biggest change is a new fast-purchase path for enchanted books:
 - Output counting is enchantment-aware (`countOutputItem`), so different enchanted books never
   get mixed up when deciding what to store.
 
-### Offer matching
+### Offer matching & single-config lock
 
-- `findMatchingTrade` resolves the configured trade to the actual offer on a villager by
-  profession, output item, enchantments and inputs, and selects it before purchasing.
+- `findMatchingConfig` matches an actual villager offer against the configured trades by output
+  item, enchantments and inputs.
+- During purchase planning the **first** matching offer locks that config for the whole merchant
+  session: every further offer must structurally match the locked config to be queued, so offers
+  belonging to different configs never mix into one purchase queue (which previously caused
+  `Result slot != expected` skips).
+
+### Purchase logging with enchantments
+
+- `Bought ...` log lines include the actual enchantment and level from the config, for example
+  `Bought 12 enchanted_book [flame 1]` or `Bought 2 enchanted_book [efficiency 5]`. Non-enchanted
+  outputs keep the plain format (`Bought 48 glass`).
 
 ### Robust container opening (sneak-toggle retry)
 
 - Some servers occasionally fail to open a container even though the right-click reaches the
-  block (players can work around it by crouching and standing back up). If a configured chest
-  does not open within the interaction timeout, the module now simulates exactly that workaround:
-  it sends `START_SNEAKING`, holds it for a few ticks, sends `STOP_SNEAKING`, and retries the
-  interaction automatically.
-- This applies to every container the module opens (restock chests, output/storage chests, and
-  post-trade deposit chests). After five consecutive failures the current trade is skipped to
-  avoid spinning forever on a broken/unreachable chest.
+  block (players can work around it by crouching and standing back up). When a configured chest
+  does not open within the interaction timeout, the module crouches once via the player input
+  system (`InputRequest` with `sneaking(true)`, like the built-in `Click` module); each tick
+  before the state machine runs the bot stands back up (an `InputRequest` with `sneaking(false)`)
+  whenever the bot's local state `BOT.isSneaking()` says it is crouching, so the crouch lasts
+  only a single-tick window, the next state executes standing, and the bot can never be left
+  permanently crouched. The rest of the timeout behaviour stays identical to upstream
+  (abandoning the restock for restock chests, or retrying the chest for store / post-trade
+  deposit chests).
 
 ## Thanks
 

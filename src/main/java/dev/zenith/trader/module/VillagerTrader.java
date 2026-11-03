@@ -5,6 +5,7 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.Lists;
 import com.zenith.Proxy;
+import com.zenith.cache.data.entity.Entity;
 import com.zenith.cache.data.entity.EntityLiving;
 import com.zenith.cache.data.inventory.Container;
 import com.zenith.discord.Embed;
@@ -18,6 +19,13 @@ import com.zenith.feature.pathfinder.Baritone;
 import com.zenith.feature.pathfinder.PathingRequestFuture;
 import com.zenith.feature.player.Input;
 import com.zenith.feature.player.InputRequest;
+import com.zenith.feature.player.World;
+import com.zenith.mc.block.Block;
+import com.zenith.mc.block.BlockPos;
+import com.zenith.mc.block.BlockRegistry;
+import com.zenith.mc.block.BlockTags;
+import com.zenith.mc.block.Direction;
+import com.zenith.mc.block.properties.api.BlockStateProperties;
 import com.zenith.mc.enchantment.EnchantmentRegistry;
 import com.zenith.mc.item.ContainerTypeInfoRegistry;
 import com.zenith.mc.item.ItemRegistry;
@@ -202,8 +210,7 @@ public class VillagerTrader extends Module {
                         return;
                     }
                 }
-                var output = ItemRegistry.REGISTRY.get(trade.outputItem);
-                int outputCount = countItem(output.id());
+                int outputCount = countOutputItem(trade);
                 if (outputCount > trade.outputItemStoreCountThreshold) {
                     setState(State.STORE_GO_TO_CHEST);
                     return;
@@ -579,7 +586,7 @@ public class VillagerTrader extends Module {
                     var outputBought = countItem(trade.getOutputItem().id()) - preTradeOutputCount;
                     info("Bought {} {}{}", outputBought, trade.getOutputItem().name(), enchantmentSuffix(trade));
                     outputBuyCount += outputBought;
-                    if (countItem(trade.getOutputItem().id()) > trade.outputItemStoreCountThreshold) {
+                    if (countOutputItem(trade) > trade.outputItemStoreCountThreshold) {
                         setState(State.STORE_GO_TO_CHEST);
                     } else {
                         setState(State.EVAL_RESTOCK);
@@ -889,6 +896,263 @@ public class VillagerTrader extends Module {
         }
         return " [" + sb + ']';
     }
+
+    /**
+     * Item ids a villager can sell to the player (Java Edition 1.21.4 trade offers,
+     * see https://minecraft.wiki/w/Trading). A display frame only creates or updates
+     * a trade entry when it holds one of these items, in the same spirit as KillAura's
+     * hardcoded hostileEntities set, so no item catalog has to live in the config.
+     *
+     * Trades whose extra input is not a book (maps, tipped arrows, cooked fish,
+     * banner patterns) are intentionally absent: the two input restock mechanism
+     * only supports emerald + book.
+     */
+    private static final Set<String> villagerSellableOutputs = Set.of(
+            "apple", "arrow", "bell", "quartz_block", "bookshelf", "experience_bottle",
+            "bow", "bread", "brick", "cod_bucket", "cake", "campfire",
+            "chainmail_boots", "chainmail_chestplate", "chainmail_helmet", "chainmail_leggings", "chiseled_stone_bricks", "clock",
+            "compass", "cooked_chicken", "cooked_porkchop", "cookie", "crossbow", "diamond_hoe",
+            "diamond_axe", "diamond_boots", "diamond_chestplate", "diamond_helmet", "diamond_leggings", "diamond_pickaxe",
+            "diamond_shovel", "diamond_sword", "dripstone_block", "map", "enchanted_book", "fishing_rod",
+            "iron_axe", "iron_pickaxe", "iron_shovel", "iron_sword", "iron_boots", "iron_chestplate",
+            "iron_helmet", "iron_leggings", "ender_pearl", "glass", "glistering_melon_slice", "glowstone",
+            "golden_carrot", "item_frame", "lantern", "lapis_lazuli", "leather_boots", "leather_helmet",
+            "leather_leggings", "leather_chestplate", "leather_horse_armor", "painting", "polished_andesite", "polished_diorite",
+            "polished_granite", "pumpkin_pie", "quartz_pillar", "rabbit_stew", "red_candle", "redstone",
+            "saddle", "shears", "shield", "stone_axe", "stone_hoe", "stone_pickaxe",
+            "stone_shovel", "suspicious_stew", "yellow_candle", "name_tag", "white_banner", "white_bed",
+            "white_carpet", "white_wool", "white_terracotta", "white_glazed_terracotta", "orange_banner", "orange_bed",
+            "orange_carpet", "orange_wool", "orange_terracotta", "orange_glazed_terracotta", "magenta_banner", "magenta_bed",
+            "magenta_carpet", "magenta_wool", "magenta_terracotta", "magenta_glazed_terracotta", "light_blue_banner", "light_blue_bed",
+            "light_blue_carpet", "light_blue_wool", "light_blue_terracotta", "light_blue_glazed_terracotta", "yellow_banner", "yellow_bed",
+            "yellow_carpet", "yellow_wool", "yellow_terracotta", "yellow_glazed_terracotta", "lime_banner", "lime_bed",
+            "lime_carpet", "lime_wool", "lime_terracotta", "lime_glazed_terracotta", "pink_banner", "pink_bed",
+            "pink_carpet", "pink_wool", "pink_terracotta", "pink_glazed_terracotta", "gray_banner", "gray_bed",
+            "gray_carpet", "gray_wool", "gray_terracotta", "gray_glazed_terracotta", "light_gray_banner", "light_gray_bed",
+            "light_gray_carpet", "light_gray_wool", "light_gray_terracotta", "light_gray_glazed_terracotta", "cyan_banner", "cyan_bed",
+            "cyan_carpet", "cyan_wool", "cyan_terracotta", "cyan_glazed_terracotta", "purple_banner", "purple_bed",
+            "purple_carpet", "purple_wool", "purple_terracotta", "purple_glazed_terracotta", "blue_banner", "blue_bed",
+            "blue_carpet", "blue_wool", "blue_terracotta", "blue_glazed_terracotta", "brown_banner", "brown_bed",
+            "brown_carpet", "brown_wool", "brown_terracotta", "brown_glazed_terracotta", "green_banner", "green_bed",
+            "green_carpet", "green_wool", "green_terracotta", "green_glazed_terracotta", "red_banner", "red_bed",
+            "red_carpet", "red_wool", "red_terracotta", "red_glazed_terracotta", "black_banner", "black_bed",
+            "black_carpet", "black_wool", "black_terracotta", "black_glazed_terracotta"
+        );
+
+    /**
+     * Scans the item frames around the player and creates or updates trade entries:
+     * <ul>
+     *   <li>emerald frame attached to a container -&gt; input 1 chest</li>
+     *   <li>book frame attached to a container -&gt; input 2 chest</li>
+     *   <li>any other whitelisted item -&gt; output item: the first container scanned
+     *       straight below the frame becomes its output chest, the first redstone lamp
+     *       scanned straight above it toggles the trade (lit = enabled)</li>
+     * </ul>
+     * Enchanted books are matched against existing trades by enchantment and level.
+     */
+    public ScanResult scanItemFrames() {
+        int ignored = 0;
+        int skipped = 0;
+        int noLampFrames = 0;
+        int generated = 0;
+        int updated = 0;
+        String problem = null;
+        BlockPos input1Chest = null;
+        BlockPos input2Chest = null;
+        var outputFrames = new ArrayList<OutputScan>();
+        for (Entity entity : CACHE.getEntityCache().getEntities().values()) {
+            if (entity.getEntityType() != EntityType.ITEM_FRAME && entity.getEntityType() != EntityType.GLOW_ITEM_FRAME) continue;
+            if (!isInItemFrameScanArea(entity)) continue;
+            var item = entity.getMetadataValue(8, MetadataTypes.ITEM, ItemStack.class);
+            if (item == null || item == Container.EMPTY_STACK || item.getId() == ItemRegistry.AIR.id()) {
+                ignored++;
+                continue;
+            }
+            var itemData = ItemRegistry.REGISTRY.get(item.getId());
+            if (itemData == null) {
+                ignored++;
+                continue;
+            }
+            var framePos = entity.blockPos();
+            var itemName = itemData.name();
+            if (itemName.equals(ItemRegistry.EMERALD.name()) || itemName.equals(ItemRegistry.EMERALD_BLOCK.name())) {
+                var container = attachedContainer(entity, framePos);
+                if (container == null) {
+                    ignored++;
+                    problem = firstProblem(problem, "Emerald item frame at " + framePos + " is not attached to a container");
+                } else if (input1Chest == null) {
+                    input1Chest = container;
+                }
+                continue;
+            }
+            if (itemName.equals(ItemRegistry.BOOK.name())) {
+                var container = attachedContainer(entity, framePos);
+                if (container == null) {
+                    ignored++;
+                } else if (input2Chest == null) {
+                    input2Chest = container;
+                }
+                continue;
+            }
+            if (!villagerSellableOutputs.contains(itemName)) {
+                ignored++;
+                continue;
+            }
+            var isEnchantedBook = itemName.equals(ItemRegistry.ENCHANTED_BOOK.name());
+            var enchantment = isEnchantedBook ? displayedBookEnchantment(item) : null;
+            if (isEnchantedBook && enchantment == null) {
+                ignored++;
+                problem = firstProblem(problem, "Enchanted book item frame at " + framePos + " has no single stored enchantment");
+                continue;
+            }
+            var outputChest = findContainerBelow(framePos);
+            if (outputChest == null) {
+                skipped++;
+                problem = firstProblem(problem, "No container below item frame at " + framePos + ", skipped " + itemName);
+                continue;
+            }
+            var lampLit = findRedstoneLampAbove(framePos);
+            if (lampLit == null) noLampFrames++;
+            outputFrames.add(new OutputScan(itemName, enchantment, outputChest, lampLit));
+        }
+        if (input1Chest == null) {
+            return new ScanResult(outputFrames.size(), 0, 0, ignored, skipped, noLampFrames,
+                firstProblem(problem, "No emerald item frame attached to a container was found"));
+        }
+        for (var output : outputFrames) {
+            if (output.enchantment() != null && input2Chest == null) {
+                skipped++;
+                problem = firstProblem(problem, "Enchanted book item frame found, but no book item frame attached to a container was found");
+                continue;
+            }
+            var input2 = output.enchantment() == null ? null : input2Chest;
+            var existing = findExistingTrade(output);
+            if (existing != null) {
+                applyScannedTrade(existing, output, input1Chest, input2);
+                updated++;
+                continue;
+            }
+            var trade = new VillagerTraderConfig.Trade();
+            applyScannedTrade(trade, output, input1Chest, input2);
+            PLUGIN_CONFIG.trades.put(uniqueScannedTradeId(output), trade);
+            generated++;
+        }
+        if (generated > 0 || updated > 0) {
+            tradeIterator.refresh();
+        }
+        return new ScanResult(outputFrames.size(), generated, updated, ignored, skipped, noLampFrames, problem);
+    }
+
+    private void applyScannedTrade(VillagerTraderConfig.Trade trade, OutputScan output, BlockPos input1Chest, @Nullable BlockPos input2Chest) {
+        var enchantment = output.enchantment();
+        trade.outputItem = output.itemName();
+        trade.outputChest = output.containerPos();
+        trade.inputItem1 = ItemRegistry.EMERALD.name();
+        trade.inputItem1Chest = input1Chest;
+        if (enchantment != null) {
+            trade.inputItem2 = ItemRegistry.BOOK.name();
+            if (input2Chest != null) {
+                trade.inputItem2Chest = input2Chest;
+            }
+            trade.outputItemEnchantments.clear();
+            trade.outputItemEnchantments.put(enchantment.name(), enchantment.level());
+        }
+        if (output.lampLit() != null) {
+            trade.enabled = output.lampLit();
+        }
+    }
+
+    private VillagerTraderConfig.@Nullable Trade findExistingTrade(OutputScan output) {
+        var enchantment = output.enchantment();
+        for (var trade : PLUGIN_CONFIG.trades.values()) {
+            if (!trade.outputItem.equals(output.itemName())) continue;
+            if (enchantment == null) return trade;
+            if (trade.outputItemEnchantments.size() != 1) continue;
+            if (trade.outputItemEnchantments.getInt(enchantment.name()) != enchantment.level()) continue;
+            return trade;
+        }
+        return null;
+    }
+
+    private String uniqueScannedTradeId(OutputScan output) {
+        var enchantment = output.enchantment();
+        String id = output.itemName();
+        if (enchantment != null) {
+            id = enchantment.name();
+            for (var trade : PLUGIN_CONFIG.trades.values()) {
+                if (trade.outputItem.equals(output.itemName()) && trade.outputItemEnchantments.containsKey(enchantment.name())) {
+                    id = enchantment.name() + "_" + enchantment.level();
+                    break;
+                }
+            }
+        }
+        var base = id;
+        int suffix = 1;
+        while (PLUGIN_CONFIG.trades.containsKey(id)) {
+            id = base + "_" + (++suffix);
+        }
+        return id;
+    }
+
+    private @Nullable BlockPos attachedContainer(Entity frame, BlockPos framePos) {
+        if (!(frame.getObjectData() instanceof org.geysermc.mcprotocollib.protocol.data.game.entity.object.Direction direction)) return null;
+        var supportingBlock = framePos.relative(Direction.valueOf(direction.name()).invert());
+        return isStorageContainer(supportingBlock) ? supportingBlock : null;
+    }
+
+    private boolean isStorageContainer(BlockPos pos) {
+        if (!World.isChunkLoadedBlockPos(pos.x(), pos.z())) return false;
+        Block block = World.getBlock(pos);
+        return block == BlockRegistry.CHEST || block == BlockRegistry.TRAPPED_CHEST || block == BlockRegistry.BARREL
+            || block.blockTags().contains(BlockTags.SHULKER_BOXES);
+    }
+
+    private @Nullable BlockPos findContainerBelow(BlockPos framePos) {
+        int range = PLUGIN_CONFIG.itemFrameScanVerticalRangeBlocks;
+        for (int i = 1; i <= range; i++) {
+            var pos = framePos.relative(Direction.DOWN, i);
+            if (isStorageContainer(pos)) return pos;
+        }
+        return null;
+    }
+
+    private @Nullable Boolean findRedstoneLampAbove(BlockPos framePos) {
+        int range = PLUGIN_CONFIG.itemFrameScanVerticalRangeBlocks;
+        for (int i = 1; i <= range; i++) {
+            var pos = framePos.relative(Direction.UP, i);
+            if (!World.isChunkLoadedBlockPos(pos.x(), pos.z())) return null;
+            if (World.getBlock(pos) != BlockRegistry.REDSTONE_LAMP) continue;
+            return World.getBlockState(pos).getProperty(BlockStateProperties.LIT);
+        }
+        return null;
+    }
+
+    private boolean isInItemFrameScanArea(Entity entity) {
+        int horizontalRange = PLUGIN_CONFIG.itemFrameScanHorizontalRangeBlocks;
+        int verticalRange = PLUGIN_CONFIG.itemFrameScanVerticalRangeBlocks;
+        var player = CACHE.getPlayerCache().getThePlayer();
+        return Math.abs(entity.getX() - player.getX()) <= horizontalRange
+            && Math.abs(entity.getZ() - player.getZ()) <= horizontalRange
+            && Math.abs(entity.getY() - player.getY()) <= verticalRange;
+    }
+
+    private @Nullable DisplayedEnchantment displayedBookEnchantment(ItemStack item) {
+        var components = item.getDataComponents();
+        if (components == null) return null;
+        var stored = components.get(DataComponentTypes.STORED_ENCHANTMENTS);
+        if (stored == null || stored.getEnchantments().size() != 1) return null;
+        var entry = stored.getEnchantments().int2IntEntrySet().iterator().next();
+        var enchantment = EnchantmentRegistry.REGISTRY.get(entry.getIntKey());
+        return enchantment == null ? null : new DisplayedEnchantment(enchantment.name(), entry.getIntValue());
+    }
+
+    private static String firstProblem(String current, String message) {
+        return current == null ? message : current;
+    }
+
+    private record DisplayedEnchantment(String name, int level) {}
+    private record OutputScan(String itemName, @Nullable DisplayedEnchantment enchantment, BlockPos containerPos, @Nullable Boolean lampLit) {}
+    public record ScanResult(int outputFrames, int generated, int updated, int ignored, int skipped, int noLampFrames, @Nullable String problem) {}
 
     private void stop() {
         PLUGIN_CONFIG.enabled = false;

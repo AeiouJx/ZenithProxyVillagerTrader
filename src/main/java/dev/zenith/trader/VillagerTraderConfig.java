@@ -14,6 +14,8 @@ public class VillagerTraderConfig {
     public boolean enabled = false;
     public long waitForInteractTimeoutTicks = 20L;
     public boolean logTradeStatusToDiscord = false;
+    public int itemFrameScanHorizontalRangeBlocks = 32;
+    public int itemFrameScanVerticalRangeBlocks = 8;
 
     public LinkedHashMap<String, Trade> trades = new LinkedHashMap<>();
 

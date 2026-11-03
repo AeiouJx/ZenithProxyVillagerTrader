@@ -11,8 +11,8 @@ import net.kyori.adventure.text.logger.slf4j.ComponentLogger;
     id = BuildConstants.PLUGIN_ID,
     version = BuildConstants.VERSION,
     description = "ZenithProxy Villager Trader",
-    url = "https://github.com/rfresh2/ZenithProxyVillagerTrader",
-    authors = {"rfresh2"},
+    url = "https://github.com/AeiouJx/ZenithProxyVillagerTrader",
+    authors = {"rfresh2,AeiouJx"},
     mcVersions = {BuildConstants.MC_VERSION}
 )
 public class VillagerTraderPlugin implements ZenithProxyPlugin {

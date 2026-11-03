@@ -24,6 +24,10 @@ You need the following setup ingame:
 * `trader del <id>`
 * `trader clear`
 * `trader list`
+* `trader scan`
+  * Scans the item frames around the player and creates/updates trade entries (see below)
+* `trader scanRange <h> [v]`
+  * Sets the item frame scan range in blocks, horizontal (default 32) and vertical (default 8)
 * `trader waitForInteractionTimeout <ticks>`
 
 ### Actions Loop
@@ -60,6 +64,36 @@ The biggest change is a new fast-purchase path for enchanted books:
   and the purchase finishes without clicking.
 - If a villager really does have multiple offers with the *same* enchant and level, the module
   falls back to the **upstream** logic: batched shift-clicks, then per-trade left-clicks.
+
+### Item frame scan (`trader scan`)
+
+Trade entries can be generated from an in-game item frame layout instead of being typed into the
+config by hand. `trader scan` runs once (it is deliberately not hooked into `trader on`, because
+it writes trade entries) and inspects every item frame within the scan range around the player:
+
+| Frame content | Meaning |
+| --- | --- |
+| Emerald (or emerald block) | The container the frame is attached to becomes `inputItem1Chest` |
+| Book | The container the frame is attached to becomes `inputItem2Chest` (second input) |
+| Any other whitelisted item | The trade output item. The first container found **below** the frame becomes `outputChest`, the first redstone lamp found **above** the frame sets `enabled` (lit = enabled, unlit = disabled) |
+
+- Only items a villager can sell to the player (Java Edition 1.21.4 trade offers) are accepted;
+  they are hardcoded in `VillagerTrader.villagerSellableOutputs`, in the same spirit as
+  KillAura's `hostileEntities` set, so no item catalog is added to the config. Frames holding
+  anything else are counted as ignored.
+- Trades whose extra input is not a book (maps, tipped arrows, cooked fish, banner patterns) are
+  intentionally excluded, because the restock mechanism only supports emerald + book inputs.
+- Enchanted books are matched against existing trades by **enchantment and level**; the displayed
+  book must hold exactly one stored enchantment.
+- Existing matching trades are updated (output chest, input chests, enabled state), unmatched
+  items create a new trade entry with `inputItem1 = emerald` (+ `inputItem2 = book` for enchanted
+  books).
+- Frames with no container below, enchanted book frames without a book input frame, or frames
+  outside the range are skipped and reported in the result embed. Frames without a redstone lamp
+  keep their current/enabled-by-default state and are counted separately.
+- `trader scanRange <h> [v]` changes the horizontal/vertical range around the player (defaults
+  32 / 8 blocks); the same values bound the downward container search and upward redstone lamp
+  search from each frame.
 
 ### Storage sweep across all configured trades
 

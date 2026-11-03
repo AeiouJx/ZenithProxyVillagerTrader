@@ -44,6 +44,8 @@ public class VillagerTraderCommand extends Command {
               See `set help` for additional commands that modify trade settings, like enchantments, post trade storage modes, and restock amounts.
               
               `waitForInteractTimeout` -> timeout for server interactions like opening villager trade window
+              
+              `scan` -> scan item frames around the player and create/update trade entries (emerald frame = input 1 chest, book frame = input 2 chest, other item = output with container below and redstone lamp above)
               """)
             .usageLines(
                 "on/off",
@@ -52,6 +54,8 @@ public class VillagerTraderCommand extends Command {
                 "del <id>",
                 "clear",
                 "list",
+                "scan",
+                "scanRange <h> [v]",
                 "set help",
                 "waitForInteractTimeout <ticks>",
                 "logTradeStatusToDiscord on/off"
@@ -599,6 +603,43 @@ public class VillagerTraderCommand extends Command {
                     .description(printAllTrades());
                 c.getSource().getData().put("list", true);
             }))
+            .then(literal("scan").executes(c -> {
+                var holder = new VillagerTrader.ScanResult[1];
+                inEventLoop(() -> holder[0] = MODULE.get(VillagerTrader.class).scanItemFrames());
+                var scan = holder[0];
+                var embed = c.getSource().getEmbed()
+                    .title("Item Frame Scan")
+                    .addField("Output Frames", scan.outputFrames())
+                    .addField("Generated Trades", scan.generated())
+                    .addField("Updated Trades", scan.updated())
+                    .addField("Ignored Frames", scan.ignored())
+                    .addField("Skipped Frames", scan.skipped())
+                    .addField("Frames Without Redstone Lamp", scan.noLampFrames());
+                if (scan.problem() != null) {
+                    embed.addField("Problem", scan.problem());
+                }
+                embed.primaryColor();
+                return OK;
+            }))
+            .then(literal("scanRange")
+                .then(argument("horizontal", integer(1, 256)).executes(c -> {
+                    PLUGIN_CONFIG.itemFrameScanHorizontalRangeBlocks = getInteger(c, "horizontal");
+                    c.getSource().getEmbed()
+                        .title("Scan Range Set")
+                        .addField("Horizontal", PLUGIN_CONFIG.itemFrameScanHorizontalRangeBlocks + " blocks")
+                        .addField("Vertical", PLUGIN_CONFIG.itemFrameScanVerticalRangeBlocks + " blocks");
+                    return OK;
+                }))
+                .then(argument("horizontal", integer(1, 256)).then(argument("vertical", integer(1, 64)).executes(c -> {
+                    PLUGIN_CONFIG.itemFrameScanHorizontalRangeBlocks = getInteger(c, "horizontal");
+                    PLUGIN_CONFIG.itemFrameScanVerticalRangeBlocks = getInteger(c, "vertical");
+                    c.getSource().getEmbed()
+                        .title("Scan Range Set")
+                        .addField("Horizontal", PLUGIN_CONFIG.itemFrameScanHorizontalRangeBlocks + " blocks")
+                        .addField("Vertical", PLUGIN_CONFIG.itemFrameScanVerticalRangeBlocks + " blocks");
+                    return OK;
+                })))
+            )
             .then(literal("waitForInteractTimeout").then(argument("ticks", time()).executes(c -> {;
                 PLUGIN_CONFIG.waitForInteractTimeoutTicks = getInteger(c, "ticks");
                 c.getSource().getEmbed()
@@ -617,6 +658,7 @@ public class VillagerTraderCommand extends Command {
             ctx.getEmbed()
                 .addField("Villager Trader", toggleStr(PLUGIN_CONFIG.enabled))
                 .addField("Wait For Interact Timeout", PLUGIN_CONFIG.waitForInteractTimeoutTicks + " ticks")
+                .addField("Item Frame Scan Range", PLUGIN_CONFIG.itemFrameScanHorizontalRangeBlocks + "x" + PLUGIN_CONFIG.itemFrameScanVerticalRangeBlocks + " blocks")
                 .addField("Log Trade Status To Discord", PLUGIN_CONFIG.logTradeStatusToDiscord);
         }
         ctx.getEmbed()

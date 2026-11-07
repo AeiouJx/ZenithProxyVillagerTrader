@@ -28,6 +28,9 @@ You need the following setup ingame:
   * Scans the item frames around the player and creates/updates trade entries (see below)
 * `trader scanRange <h> [v]`
   * Sets the item frame scan range in blocks, horizontal (default 32) and vertical (default 8)
+* `trader maxBookEmeraldCost <count>`
+  * Caps the emeralds the module pays per enchanted book trade (default 64); trades created by
+    `trader scan` pick this up automatically
 * `trader waitForInteractionTimeout <ticks>`
 
 ### Actions Loop
@@ -77,17 +80,22 @@ it writes trade entries) and inspects every item frame within the scan range aro
 | Book | The container the frame is attached to becomes `inputItem2Chest` (second input) |
 | Any other whitelisted item | The trade output item. The first container found **below** the frame becomes `outputChest`, the first redstone lamp found **above** the frame sets `enabled` (lit = enabled, unlit = disabled) |
 
-- Only items a villager can sell to the player (Java Edition 1.21.4 trade offers) are accepted;
-  they are hardcoded in `VillagerTrader.villagerSellableOutputs`, in the same spirit as
-  KillAura's `hostileEntities` set, so no item catalog is added to the config. Frames holding
+- Only items a villager can sell to the player (Java Edition 1.21.4 trade offers) are accepted.
+  They are hardcoded per profession in `VillagerTrader.VILLAGER_SELLABLE_OUTPUTS`, in the same
+  spirit as KillAura's `hostileEntities` set, so no item catalog is added to the config; a frame
+  whose item is sold by several professions creates one entry per profession. Frames holding
   anything else are counted as ignored.
 - Trades whose extra input is not a book (maps, tipped arrows, cooked fish, banner patterns) are
   intentionally excluded, because the restock mechanism only supports emerald + book inputs.
 - Enchanted books are matched against existing trades by **enchantment and level**; the displayed
-  book must hold exactly one stored enchantment.
-- Existing matching trades are updated (output chest, input chests, enabled state), unmatched
-  items create a new trade entry with `inputItem1 = emerald` (+ `inputItem2 = book` for enchanted
-  books).
+  book must expose one readable enchantment (stored enchantments, direct enchantments, or a
+  lore-prefixed one from a cross-version server).
+- Existing matching trades are updated (profession, output chest, input chests, enabled state),
+  unmatched items create a new trade entry with `inputItem1 = emerald` (+ `inputItem2 = book`
+  for enchanted books). Entry ids are derived from the item and profession, for example
+  `glass_mason` or `unbreaking_3`.
+- The scan owns the whole trade list: entries that no current frame represents are treated as
+  stale and removed, so back up `trader list` first if you keep hand-written entries.
 - Frames with no container below, enchanted book frames without a book input frame, or frames
   outside the range are skipped and reported in the result embed. Frames without a redstone lamp
   keep their current/enabled-by-default state and are counted separately.

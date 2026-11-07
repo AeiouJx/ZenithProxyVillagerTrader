@@ -58,6 +58,7 @@ public class VillagerTraderCommand extends Command {
                 "scanRange <h> [v]",
                 "set help",
                 "waitForInteractTimeout <ticks>",
+                "maxBookEmeraldCost <count>",
                 "logTradeStatusToDiscord on/off"
             )
             .build();
@@ -576,7 +577,7 @@ public class VillagerTraderCommand extends Command {
                         .title("Trade ID Not Found")
                         .addField("ID", id)
                         .description(printAllTrades());
-                    c.getSource().getData().put("list", true);;
+                    c.getSource().getData().put("list", true);
                     return ERROR;
                 }
                 inEventLoop(() -> {
@@ -640,10 +641,15 @@ public class VillagerTraderCommand extends Command {
                     return OK;
                 })))
             )
-            .then(literal("waitForInteractTimeout").then(argument("ticks", time()).executes(c -> {;
+            .then(literal("waitForInteractTimeout").then(argument("ticks", time()).executes(c -> {
                 PLUGIN_CONFIG.waitForInteractTimeoutTicks = getInteger(c, "ticks");
                 c.getSource().getEmbed()
                     .title("Wait For Interact Timeout Set");
+            })))
+            .then(literal("maxBookEmeraldCost").then(argument("count", integer(1, 64)).executes(c -> {
+                PLUGIN_CONFIG.maxEmeraldCostForEnchantedBook = getInteger(c, "count");
+                c.getSource().getEmbed().title("Maximum Enchanted Book Emerald Cost Set")
+                    .addField("Maximum Emeralds", PLUGIN_CONFIG.maxEmeraldCostForEnchantedBook);
             })))
             .then(literal("logTradeStatusToDiscord").then(argument("toggle", toggle()).executes(c -> {
                 PLUGIN_CONFIG.logTradeStatusToDiscord = getToggle(c, "toggle");
@@ -658,6 +664,7 @@ public class VillagerTraderCommand extends Command {
             ctx.getEmbed()
                 .addField("Villager Trader", toggleStr(PLUGIN_CONFIG.enabled))
                 .addField("Wait For Interact Timeout", PLUGIN_CONFIG.waitForInteractTimeoutTicks + " ticks")
+                .addField("Max Book Emerald Cost", PLUGIN_CONFIG.maxEmeraldCostForEnchantedBook)
                 .addField("Item Frame Scan Range", PLUGIN_CONFIG.itemFrameScanHorizontalRangeBlocks + "x" + PLUGIN_CONFIG.itemFrameScanVerticalRangeBlocks + " blocks")
                 .addField("Log Trade Status To Discord", PLUGIN_CONFIG.logTradeStatusToDiscord);
         }
@@ -721,10 +728,13 @@ public class VillagerTraderCommand extends Command {
     public String printAllTrades() {
         StringBuilder sb = new StringBuilder();
         var trades = PLUGIN_CONFIG.trades;
+        int index = 1;
         for (var entry : trades.entrySet()) {
             var id = entry.getKey();
             var trade = entry.getValue();
             sb
+                .append(index++)
+                .append(". ")
                 .append(printTrade(id, trade))
                 .append("\n");
         }

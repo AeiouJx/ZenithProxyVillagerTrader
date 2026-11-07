@@ -66,13 +66,14 @@ public class VillagerTrader extends Module {
     private final Cache<UUID, Boolean> interactedVillagersCache = CacheBuilder.newBuilder()
         .build();
     private final TradeIterator tradeIterator = new TradeIterator();
+    private @Nullable UUID activeVillagerUuid;
     private PathingRequestFuture restockPathingFuture = PathingRequestFuture.rejected;
     private RequestFuture restockWithdrawFuture = RequestFuture.rejected;
     private RequestFuture emeraldBlockCraftFuture = RequestFuture.rejected;
     private PathingRequestFuture interactWithVillagerFuture = PathingRequestFuture.rejected;
     private ClientboundMerchantOffersPacket offersPacket = null;
     private RequestFuture purchaseFuture = RequestFuture.rejected;
-    private final IntList selectTradeQueue = new IntArrayList();
+    private final List<QueuedTrade> selectTradeQueue = new ArrayList<>();
     private int selectTradePos = 0;
     private RequestFuture selectTradeFuture = RequestFuture.rejected;
     private RequestFuture shiftResultFuture = RequestFuture.rejected;
@@ -115,6 +116,7 @@ public class VillagerTrader extends Module {
     private void reset() {
         state = State.ENTRYPOINT;
         interactedVillagersCache.invalidateAll();
+        activeVillagerUuid = null;
         offersPacket = null;
         waitForInteractTimer.reset();
         waitForRestockTimer.reset();
@@ -127,7 +129,7 @@ public class VillagerTrader extends Module {
     private void resetTradeCounter() {
         preTradeOutputCount = 0;
         preTradeInput1Count = 0;
-        preTradeInput2Count = 0;;
+        preTradeInput2Count = 0;
         outputBuyCount = 0;
         input1SellCount = 0;
         input2SellCount = 0;
@@ -152,7 +154,8 @@ public class VillagerTrader extends Module {
 
     private Optional<VillagerTraderConfig.Trade> findMatchingConfig(VillagerTrade offer) {
         for (var config : tradeIterator.backingArray) {
-            if (offer.getOutput().getId() != ItemRegistry.REGISTRY.get(config.outputItem).id()) continue;
+            if (offer.getOutput() != null && offer.getOutput().getId() != ItemRegistry.REGISTRY.get(config.outputItem).id())
+                continue;
             if (offer.getFirstInput().getId() != ItemRegistry.REGISTRY.get(config.inputItem1).id()) continue;
             if (config.has2InputTrade()) {
                 if (offer.getSecondInput() == null) continue;
@@ -169,7 +172,8 @@ public class VillagerTrader extends Module {
     }
 
     private void onTick(ClientBotTick event) {
-        if (Proxy.getInstance().isInQueue() || !CACHE.getPlayerCache().getThePlayer().isAlive()) {
+        var player = CACHE.getPlayerCache().getThePlayer();
+        if (Proxy.getInstance().isInQueue() || player == null || !player.isAlive()) {
             state = State.ENTRYPOINT;
             return;
         }
@@ -185,7 +189,6 @@ public class VillagerTrader extends Module {
                 if (!tradeIterator.hasNext())
                     return;
                 resetTradeCounter();
-                interactedVillagersCache.invalidateAll();
                 setState(State.EVAL_RESTOCK);
             }
             case EVAL_RESTOCK -> {
@@ -355,7 +358,7 @@ public class VillagerTrader extends Module {
             }
             case TRADING_INTERACT_WITH_VILLAGER -> {
                 var trade = tradeIterator.current();
-                var nextVillagerOptional = nextVillager(trade);
+                var nextVillagerOptional = nextVillager();
                 if (nextVillagerOptional.isEmpty()) {
                     if (interactedVillagersCache.asMap().isEmpty()) {
                         warn("No villagers found to trade with");
@@ -370,6 +373,7 @@ public class VillagerTrader extends Module {
                     return;
                 }
                 var nextVillager = nextVillagerOptional.get();
+                activeVillagerUuid = nextVillager.getUuid();
                 offersPacket = null;
                 interactWithVillagerFuture = BARITONE.rightClickEntity(nextVillager);
                 interactWithVillagerFuture.addExecutedListener(f -> waitForInteractTimer.reset());
@@ -399,31 +403,15 @@ public class VillagerTrader extends Module {
                 var trades = offersPacket.getTrades();
                 selectTradeQueue.clear();
                 List<InventoryAction> legacyActions = Lists.newArrayList();
-                boolean hasV2Trade = false;
                 for (int i = 0; i < trades.length; i++) {
                     var villagerTrade = trades[i];
                     if (villagerTrade.isTradeDisabled()) continue;
                     if (villagerTrade.getOutput() == null) continue;
-                    if (trade == null) {
-                        var matchingConfig = findMatchingConfig(villagerTrade);
-                        if (matchingConfig.isEmpty()) continue;
-                        tradeIterator.select(matchingConfig.get());
-                        trade = tradeIterator.current();
-                    } else {
-                        if (villagerTrade.getOutput().getId() != ItemRegistry.REGISTRY.get(trade.outputItem).id()) continue;
-                        if (villagerTrade.getFirstInput().getId() != ItemRegistry.REGISTRY.get(trade.inputItem1).id()) continue;
-                        if (trade.has2InputTrade()) {
-                            if (villagerTrade.getSecondInput() == null) continue;
-                            if (villagerTrade.getSecondInput().getId() != ItemRegistry.REGISTRY.get(trade.inputItem2).id()) continue;
-                        } else {
-                            if (villagerTrade.getSecondInput() != null) continue;
-                        }
-                        if (!trade.outputItemEnchantments.isEmpty()) {
-                            if (!enchantmentFilter(trade, villagerTrade.getOutput())) {
-                                continue;
-                            }
-                        }
-                    }
+                    var matchingConfig = findMatchingConfig(villagerTrade);
+                    if (matchingConfig.isEmpty()) continue;
+                    var candidate = matchingConfig.get();
+                    tradeIterator.select(candidate);
+                    trade = candidate;
 
                     int availableTradeCount = villagerTrade.getMaxUses() - villagerTrade.getNumUses(); // each shift click can consume many trades
 
@@ -459,49 +447,7 @@ public class VillagerTrader extends Module {
                         }
                     }
 
-                    if (canShiftClickPurchaseV2(villagerTrade, trade)) {
-                        hasV2Trade = true;
-                        if (maxTradeCount > 0) {
-                            info("shift clicking 1 time (single trade), trade count: {} inputCost1: {}", maxTradeCount, input1Cost);
-                            selectTradeQueue.add(i);
-                        }
-                    } else if (canShiftClickPurchase(villagerTrade)) {
-                        if (hasV2Trade) continue;
-                        int outputsStackSize = ItemRegistry.REGISTRY.get(villagerTrade.getOutput().getId()).stackSize();
-                        int maxTradesPerOutputStack = outputsStackSize / villagerTrade.getOutput().getAmount();
-                        int maxTradesPerShiftClick = Math.min(maxTradesPerInputStack, maxTradesPerOutputStack);
-                        int tradeCount = 0;
-                        for (int j = 0; j < maxTradeCount; j+= maxTradesPerShiftClick) {
-                            tradeCount++;
-                            legacyActions.add(new SelectTrade(offersPacket.getContainerId(), i));
-                            legacyActions.add(new ShiftClick(offersPacket.getContainerId(), 2, ShiftClickItemAction.LEFT_CLICK));
-                        }
-                        debug("shift clicking {} times, trade count: {} trades per shift click: {}", tradeCount, maxTradeCount, maxTradesPerShiftClick);
-                    } else {
-                        if (hasV2Trade) continue;
-                        /**
-                         * If there are multiple enchanted books available to trade
-                         * and one's price is lower than our current
-                         * a shift click will purchase the other books
-                         *
-                         * so we have to do left clicks only to buy one at a time, moving it to empty slots
-                         *
-                         * we could also close the inventory to have an empty slot found automatically
-                         * but it doesn't play well with current logic for interacted villager and trade completion tracking
-                         */
-                        var emptySlots = findEmptySlots();
-                        if (emptySlots.isEmpty()) {
-                            info("Can't trade because we don't have any empty inventory slots");
-                        }
-                        maxTradeCount = Math.min(maxTradeCount, emptySlots.size());
-                        for (int j = 0; j < maxTradeCount; j++) {
-                            int outputSlot = emptySlots.removeFirst();
-                            legacyActions.add(new SelectTrade(offersPacket.getContainerId(), i));
-                            legacyActions.add(new ClickItem(offersPacket.getContainerId(), 2, ClickItemAction.LEFT_CLICK));
-                            legacyActions.add(new ClickItem(offersPacket.getContainerId(), outputSlot, ClickItemAction.LEFT_CLICK));
-                        }
-                        debug("click trading {} times", maxTradeCount);
-                    }
+                    if (maxTradeCount > 0) selectTradeQueue.add(new QueuedTrade(i, candidate));
                 }
                 if (trade == null) {
                     trade = tradeIterator.current();
@@ -511,6 +457,8 @@ public class VillagerTrader extends Module {
                     setState(State.TRADING_SELECT_TRADE);
                     return;
                 }
+                if (activeVillagerUuid != null) interactedVillagersCache.put(activeVillagerUuid, true);
+                activeVillagerUuid = null;
                 legacyActions.add(new CloseContainer(offersPacket.getContainerId()));
                 purchaseFuture = INVENTORY.submit(InventoryActionRequest.builder()
                     .owner(this)
@@ -523,7 +471,9 @@ public class VillagerTrader extends Module {
                 setState(State.TRADING_AWAIT_PURCHASE);
             }
             case TRADING_SELECT_TRADE -> {
-                var tradeIndex = selectTradeQueue.getInt(selectTradePos);
+                var queuedTrade = selectTradeQueue.get(selectTradePos);
+                tradeIterator.select(queuedTrade.config());
+                var tradeIndex = queuedTrade.offerIndex();
                 selectTradeFuture = INVENTORY.submit(InventoryActionRequest.builder()
                     .owner(this)
                     .priority(getPriority())
@@ -539,14 +489,14 @@ public class VillagerTrader extends Module {
                 var resultItem = openContainer.getItemStack(2);
                 if (resultItem == Container.EMPTY_STACK) {
                     if (waitForInteractTimer.tick(PLUGIN_CONFIG.waitForInteractTimeoutTicks)) {
-                        error("Result slot still empty after selecting offer {}, skipping purchase", selectTradeQueue.getInt(selectTradePos));
+                        error("Result slot still empty after selecting offer {}, skipping purchase", selectTradeQueue.get(selectTradePos).offerIndex());
                         finishPurchase();
                     }
                     return;
                 }
                 if (resultItem.getId() != trade.getOutputItem().id()) {
                     if (waitForInteractTimer.tick(PLUGIN_CONFIG.waitForInteractTimeoutTicks)) {
-                        error("Result slot {} != expected {} after selecting offer {}, skipping purchase", resultItem.getId(), trade.getOutputItem().id(), selectTradeQueue.getInt(selectTradePos));
+                        error("Result slot {} != expected {} after selecting offer {}, skipping purchase", resultItem.getId(), trade.getOutputItem().id(), selectTradeQueue.get(selectTradePos).offerIndex());
                         finishPurchase();
                     }
                     return;
@@ -579,7 +529,7 @@ public class VillagerTrader extends Module {
                     info("Sold {} {}", input1Sold, trade.inputItem1);
                     input1SellCount += input1Sold;
                     if (trade.has2InputTrade()) {
-                        var input2Sold = preTradeInput2Count - countItem(trade.getInputItem2().id());;
+                        var input2Sold = preTradeInput2Count - countItem(trade.getInputItem2().id());
                         info("Sold {} {}", input2Sold, trade.inputItem2);
                         input2SellCount += input2Sold;
                     }
@@ -612,12 +562,14 @@ public class VillagerTrader extends Module {
                         return;
                     }
                     var outputItem = trade.getOutputItem();
-                    var actions = Lists.newArrayList(
-                        InventoryActionMacros.deposit(
-                            openContainer.getContainerId(),
-                            i -> outputItem.id() == i.getId()
-                                && (trade.outputItemEnchantments.isEmpty() || enchantmentFilter(trade, i))
-                        ));
+                    var actions = Lists.<InventoryAction>newArrayList();
+                    var containerInfo = ContainerTypeInfoRegistry.REGISTRY.get(openContainer.getType());
+                    for (int slot = containerInfo.topSlots(); slot < containerInfo.totalSlots(); slot++) {
+                        var stack = openContainer.getItemStack(slot);
+                        if (stack == Container.EMPTY_STACK || stack.getId() != outputItem.id()) continue;
+                        if (!trade.outputItemEnchantments.isEmpty() && !enchantmentFilter(trade, stack)) continue;
+                        actions.add(new ShiftClick(openContainer.getContainerId(), slot, ShiftClickItemAction.LEFT_CLICK));
+                    }
                     actions.add(new CloseContainer(openContainer.getContainerId()));
                     storeDepositFuture = INVENTORY.submit(InventoryActionRequest.builder()
                         .owner(this)
@@ -830,7 +782,12 @@ public class VillagerTrader extends Module {
             }
             case NEXT_TRADE -> {
                 var trade = tradeIterator.current();
+                int previousIndex = tradeIterator.index;
                 var nextTrade = tradeIterator.next();
+                if (tradeIterator.index <= previousIndex) {
+                    interactedVillagersCache.invalidateAll();
+                    activeVillagerUuid = null;
+                }
                 var tradeDuration = Duration.ofNanos(System.nanoTime() - tradeStartTime);
                 var tradeResult = Embed.builder()
                     .title("Trade Completed")
@@ -863,18 +820,34 @@ public class VillagerTrader extends Module {
             return false;
         var storedEnchantments = dataComponents.get(DataComponentTypes.STORED_ENCHANTMENTS);
         var enchantments = dataComponents.get(DataComponentTypes.ENCHANTMENTS);
-        if (storedEnchantments == null && enchantments == null)
-            return false;
-        var itemEnchants = (storedEnchantments != null ? storedEnchantments : enchantments).getEnchantments();
+        var itemEnchants = storedEnchantments != null ? storedEnchantments.getEnchantments()
+            : enchantments != null ? enchantments.getEnchantments() : null;
 
         for (var bookEnchantEntry : trade.outputItemEnchantments.object2IntEntrySet()) {
             String desiredEnchantKey = bookEnchantEntry.getKey();
+            if (desiredEnchantKey.startsWith("lore:")) {
+                var loreEnchant = loreEnchantment(dataComponents.toString());
+                if (loreEnchant != null
+                    && loreEnchant.name().equals(desiredEnchantKey.substring("lore:".length()))
+                    && loreEnchant.level() >= bookEnchantEntry.getIntValue()) return true;
+                continue;
+            }
+            if (itemEnchants == null) continue;
             var desiredEnchant = EnchantmentRegistry.REGISTRY.get(desiredEnchantKey);
-            if (desiredEnchant == null) {
+            int enchantId;
+            if (desiredEnchant != null) {
+                enchantId = desiredEnchant.id();
+            } else if (desiredEnchantKey.startsWith("registry:")) {
+                try {
+                    enchantId = Integer.parseInt(desiredEnchantKey.substring("registry:".length()));
+                } catch (NumberFormatException e) {
+                    error("Invalid numeric enchantment registry key: {}", desiredEnchantKey);
+                    continue;
+                }
+            } else {
                 error("Enchanted book enchantment id: {} not found in registry", desiredEnchantKey);
                 continue;
             }
-            var enchantId = desiredEnchant.id();
             int desiredLevel = bookEnchantEntry.getIntValue();
             if (!itemEnchants.containsKey(enchantId))
                 continue;
@@ -890,7 +863,7 @@ public class VillagerTrader extends Module {
         if (trade.outputItemEnchantments.isEmpty()) return "";
         StringBuilder sb = new StringBuilder();
         for (var entry : trade.outputItemEnchantments.object2IntEntrySet()) {
-            if (sb.length() > 0)
+            if (!sb.isEmpty())
                 sb.append(", ");
             sb.append(entry.getKey()).append(' ').append(entry.getIntValue());
         }
@@ -898,46 +871,213 @@ public class VillagerTrader extends Module {
     }
 
     /**
-     * Item ids a villager can sell to the player (Java Edition 1.21.4 trade offers,
-     * see https://minecraft.wiki/w/Trading). A display frame only creates or updates
-     * a trade entry when it holds one of these items, in the same spirit as KillAura's
-     * hardcoded hostileEntities set, so no item catalog has to live in the config.
-     *
      * Trades whose extra input is not a book (maps, tipped arrows, cooked fish,
      * banner patterns) are intentionally absent: the two input restock mechanism
      * only supports emerald + book.
      */
-    private static final Set<String> villagerSellableOutputs = Set.of(
-            "apple", "arrow", "bell", "quartz_block", "bookshelf", "experience_bottle",
-            "bow", "bread", "brick", "cod_bucket", "cake", "campfire",
-            "chainmail_boots", "chainmail_chestplate", "chainmail_helmet", "chainmail_leggings", "chiseled_stone_bricks", "clock",
-            "compass", "cooked_chicken", "cooked_porkchop", "cookie", "crossbow", "diamond_hoe",
-            "diamond_axe", "diamond_boots", "diamond_chestplate", "diamond_helmet", "diamond_leggings", "diamond_pickaxe",
-            "diamond_shovel", "diamond_sword", "dripstone_block", "map", "enchanted_book", "fishing_rod",
-            "iron_axe", "iron_pickaxe", "iron_shovel", "iron_sword", "iron_boots", "iron_chestplate",
-            "iron_helmet", "iron_leggings", "ender_pearl", "glass", "glistering_melon_slice", "glowstone",
-            "golden_carrot", "item_frame", "lantern", "lapis_lazuli", "leather_boots", "leather_helmet",
-            "leather_leggings", "leather_chestplate", "leather_horse_armor", "painting", "polished_andesite", "polished_diorite",
-            "polished_granite", "pumpkin_pie", "quartz_pillar", "rabbit_stew", "red_candle", "redstone",
-            "saddle", "shears", "shield", "stone_axe", "stone_hoe", "stone_pickaxe",
-            "stone_shovel", "suspicious_stew", "yellow_candle", "name_tag", "white_banner", "white_bed",
-            "white_carpet", "white_wool", "white_terracotta", "white_glazed_terracotta", "orange_banner", "orange_bed",
-            "orange_carpet", "orange_wool", "orange_terracotta", "orange_glazed_terracotta", "magenta_banner", "magenta_bed",
-            "magenta_carpet", "magenta_wool", "magenta_terracotta", "magenta_glazed_terracotta", "light_blue_banner", "light_blue_bed",
-            "light_blue_carpet", "light_blue_wool", "light_blue_terracotta", "light_blue_glazed_terracotta", "yellow_banner", "yellow_bed",
-            "yellow_carpet", "yellow_wool", "yellow_terracotta", "yellow_glazed_terracotta", "lime_banner", "lime_bed",
-            "lime_carpet", "lime_wool", "lime_terracotta", "lime_glazed_terracotta", "pink_banner", "pink_bed",
-            "pink_carpet", "pink_wool", "pink_terracotta", "pink_glazed_terracotta", "gray_banner", "gray_bed",
-            "gray_carpet", "gray_wool", "gray_terracotta", "gray_glazed_terracotta", "light_gray_banner", "light_gray_bed",
-            "light_gray_carpet", "light_gray_wool", "light_gray_terracotta", "light_gray_glazed_terracotta", "cyan_banner", "cyan_bed",
-            "cyan_carpet", "cyan_wool", "cyan_terracotta", "cyan_glazed_terracotta", "purple_banner", "purple_bed",
-            "purple_carpet", "purple_wool", "purple_terracotta", "purple_glazed_terracotta", "blue_banner", "blue_bed",
-            "blue_carpet", "blue_wool", "blue_terracotta", "blue_glazed_terracotta", "brown_banner", "brown_bed",
-            "brown_carpet", "brown_wool", "brown_terracotta", "brown_glazed_terracotta", "green_banner", "green_bed",
-            "green_carpet", "green_wool", "green_terracotta", "green_glazed_terracotta", "red_banner", "red_bed",
-            "red_carpet", "red_wool", "red_terracotta", "red_glazed_terracotta", "black_banner", "black_bed",
-            "black_carpet", "black_wool", "black_terracotta", "black_glazed_terracotta"
-        );
+    private static final Map<VillagerProfession, Set<String>> VILLAGER_SELLABLE_OUTPUTS = Map.ofEntries(
+            Map.entry(VillagerProfession.ARMORER, Set.of(  // 盔甲匠
+                    "iron_helmet",          // 铁头盔
+                    "iron_chestplate",      // 铁胸甲
+                    "iron_leggings",        // 铁护腿
+                    "iron_boots",           // 铁靴子
+                    "bell",                 // 钟
+                    "chainmail_helmet",     // 锁链头盔
+                    "chainmail_chestplate", // 锁链胸甲
+                    "chainmail_leggings",   // 锁链护腿
+                    "chainmail_boots",      // 锁链靴子
+                    "shield",               // 盾牌
+                    "diamond_helmet",       // 钻石头盔（附魔）
+                    "diamond_chestplate",   // 钻石胸甲（附魔）
+                    "diamond_leggings",     // 钻石护腿（附魔）
+                    "diamond_boots"         // 钻石靴子（附魔）
+            )),
+
+            Map.entry(VillagerProfession.BUTCHER, Set.of(  // 屠夫
+                    "rabbit_stew",          // 兔肉煲
+                    "cooked_chicken",       // 熟鸡肉
+                    "cooked_porkchop",      // 熟猪排
+                    "dried_kelp_block",     // 干海带块
+                    "sweet_berries"         // 甜浆果
+            )),
+
+            Map.entry(VillagerProfession.CARTOGRAPHER, Set.of(  // 制图师
+                    "empty_map",                    // 空地图
+                    "village_map",                  // 村庄地图
+                    "ocean_monument_map",           // 海洋神殿地图
+                    "buried_trial_chambers_map",    // 埋藏的试炼密室地图
+                    "item_frame",                   // 物品展示框
+                    "banner",                       // 旗帜（颜色随生物群系）
+                    "globe_banner_pattern",         // 地球仪旗帜图案
+                    "woodland_mansion_map"          // 林地府邸地图
+            )),
+
+            Map.entry(VillagerProfession.CLERIC, Set.of(  // 牧师
+                    "redstone",             // 红石
+                    "lapis_lazuli",         // 青金石
+                    "glowstone",            // 萤石
+                    "ender_pearl",          // 末影珍珠
+                    "experience_bottle"   // 附魔之瓶
+            )),
+
+            Map.entry(VillagerProfession.FARMER, Set.of(  // 农民
+                    "bread",                // 面包
+                    "pumpkin_pie",          // 南瓜派
+                    "apple",                // 苹果
+                    "cookie",               // 曲奇
+                    "suspicious_stew",      // 迷之炖菜
+                    "cake",                 // 蛋糕
+                    "golden_carrot",        // 金胡萝卜
+                    "glistering_melon_slice" // 闪烁的西瓜片
+            )),
+
+            Map.entry(VillagerProfession.FISHERMAN, Set.of(  // 渔夫
+                    "bucket_of_cod",        // 鳕鱼桶
+                    "cooked_cod",           // 熟鳕鱼
+                    "campfire",             // 营火
+                    "cooked_salmon",        // 熟鲑鱼
+                    "fishing_rod",          // 钓鱼竿（附魔）
+                    "boat"                  // 船（材质随生物群系）
+            )),
+
+            Map.entry(VillagerProfession.FLETCHER, Set.of(  // 制箭师
+                    "arrow",                // 箭
+                    "flint",                // 燧石
+                    "bow",                  // 弓
+                    "crossbow",             // 弩
+                    "enchanted_bow",        // 附魔弓
+                    "enchanted_crossbow",   // 附魔弩
+                    "tipped_arrow"          // 药箭
+            )),
+
+            Map.entry(VillagerProfession.LEATHERWORKER, Set.of(  // 皮匠
+                    "leather_pants",        // 皮革裤子
+                    "leather_tunic",        // 皮革外套
+                    "leather_cap",          // 皮革帽子
+                    "leather_boots",        // 皮革靴子
+                    "leather_horse_armor",  // 皮革马铠
+                    "saddle"                // 鞍
+            )),
+
+            Map.entry(VillagerProfession.LIBRARIAN, Set.of(  // 图书管理员
+                    "bookshelf",            // 书架
+                    "enchanted_book",       // 附魔书
+                    "lantern",              // 灯笼
+                    "glass",                // 玻璃
+                    "compass",              // 指南针
+                    "clock",                // 时钟
+                    "name_tag",             // 命名牌（1.21.4）
+                    "red_candle",           // 红色蜡烛（26.1）
+                    "yellow_candle"         // 黄色蜡烛（26.1）
+            )),
+
+            Map.entry(VillagerProfession.MASON, Set.of(  // 石匠
+                    "brick",                // 红砖
+                    "chiseled_stone_bricks", // 錾制石砖
+                    "dripstone_block",      // 滴水石块
+                    "polished_andesite",    // 磨制安山岩
+                    "polished_diorite",     // 磨制闪长岩
+                    "polished_granite",     // 磨制花岗岩
+                    "stained_terracotta",   // 陶瓦（任意颜色）
+                    "glazed_terracotta",    // 带釉陶瓦（任意颜色）
+                    "quartz_pillar",        // 石英柱
+                    "quartz_block"          // 石英块
+            )),
+
+            Map.entry(VillagerProfession.SHEPHERD, Set.of(  // 牧羊人
+                    "shears",               // 剪刀
+                    "white_wool",           // 白色羊毛
+                    "orange_wool",          // 橙色羊毛
+                    "magenta_wool",         // 品红色羊毛
+                    "light_blue_wool",      // 淡蓝色羊毛
+                    "yellow_wool",          // 黄色羊毛
+                    "lime_wool",            // 黄绿色羊毛
+                    "pink_wool",            // 粉红色羊毛
+                    "gray_wool",            // 灰色羊毛
+                    "light_gray_wool",      // 淡灰色羊毛
+                    "cyan_wool",            // 青色羊毛
+                    "purple_wool",          // 紫色羊毛
+                    "blue_wool",            // 蓝色羊毛
+                    "brown_wool",           // 棕色羊毛
+                    "green_wool",           // 绿色羊毛
+                    "red_wool",             // 红色羊毛
+                    "black_wool",           // 黑色羊毛
+                    "white_carpet",         // 白色地毯
+                    "orange_carpet",        // 橙色地毯
+                    "magenta_carpet",       // 品红色地毯
+                    "light_blue_carpet",    // 淡蓝色地毯
+                    "yellow_carpet",        // 黄色地毯
+                    "lime_carpet",          // 黄绿色地毯
+                    "pink_carpet",          // 粉红色地毯
+                    "gray_carpet",          // 灰色地毯
+                    "light_gray_carpet",    // 淡灰色地毯
+                    "cyan_carpet",          // 青色地毯
+                    "purple_carpet",        // 紫色地毯
+                    "blue_carpet",          // 蓝色地毯
+                    "brown_carpet",         // 棕色地毯
+                    "green_carpet",         // 绿色地毯
+                    "red_carpet",           // 红色地毯
+                    "black_carpet",         // 黑色地毯
+                    "white_bed",            // 白色床
+                    "orange_bed",           // 橙色床
+                    "magenta_bed",          // 品红色床
+                    "light_blue_bed",       // 淡蓝色床
+                    "yellow_bed",           // 黄色床
+                    "lime_bed",             // 黄绿色床
+                    "pink_bed",             // 粉红色床
+                    "gray_bed",             // 灰色床
+                    "light_gray_bed",       // 淡灰色床
+                    "cyan_bed",             // 青色床
+                    "purple_bed",           // 紫色床
+                    "blue_bed",             // 蓝色床
+                    "brown_bed",            // 棕色床
+                    "green_bed",            // 绿色床
+                    "red_bed",              // 红色床
+                    "black_bed",            // 黑色床
+                    "white_banner",         // 白色旗帜
+                    "orange_banner",        // 橙色旗帜
+                    "magenta_banner",       // 品红色旗帜
+                    "light_blue_banner",    // 淡蓝色旗帜
+                    "yellow_banner",        // 黄色旗帜
+                    "lime_banner",          // 黄绿色旗帜
+                    "pink_banner",          // 粉红色旗帜
+                    "gray_banner",          // 灰色旗帜
+                    "light_gray_banner",    // 淡灰色旗帜
+                    "cyan_banner",          // 青色旗帜
+                    "purple_banner",        // 紫色旗帜
+                    "blue_banner",          // 蓝色旗帜
+                    "brown_banner",         // 棕色旗帜
+                    "green_banner",         // 绿色旗帜
+                    "red_banner",           // 红色旗帜
+                    "black_banner",         // 黑色旗帜
+                    "painting"              // 画
+            )),
+
+            Map.entry(VillagerProfession.TOOLSMITH, Set.of(  // 工具匠
+                    "stone_axe",            // 石斧
+                    "stone_shovel",         // 石锹
+                    "stone_pickaxe",        // 石镐
+                    "stone_hoe",            // 石锄
+                    "bell",                 // 钟
+                    "iron_axe",             // 铁斧（附魔）
+                    "iron_shovel",          // 铁锹（附魔）
+                    "iron_pickaxe",         // 铁镐（附魔）
+                    "diamond_hoe",          // 钻石锄
+                    "diamond_axe",          // 钻石斧（附魔）
+                    "diamond_shovel",       // 钻石锹（附魔）
+                    "diamond_pickaxe"       // 钻石镐（附魔）
+            )),
+
+            Map.entry(VillagerProfession.WEAPONSMITH, Set.of(  // 武器匠
+                    "iron_axe",             // 铁斧
+                    "iron_sword",           // 铁剑（附魔）
+                    "bell",                 // 钟
+                    "diamond_axe",          // 钻石斧（附魔）
+                    "diamond_sword"         // 钻石剑（附魔）
+            ))
+    );
+
+
 
     /**
      * Scans the item frames around the player and creates or updates trade entries:
@@ -994,7 +1134,7 @@ public class VillagerTrader extends Module {
                 }
                 continue;
             }
-            if (!villagerSellableOutputs.contains(itemName)) {
+            if (VILLAGER_SELLABLE_OUTPUTS.values().stream().noneMatch(items -> items.contains(itemName))) {
                 ignored++;
                 continue;
             }
@@ -1002,7 +1142,7 @@ public class VillagerTrader extends Module {
             var enchantment = isEnchantedBook ? displayedBookEnchantment(item) : null;
             if (isEnchantedBook && enchantment == null) {
                 ignored++;
-                problem = firstProblem(problem, "Enchanted book item frame at " + framePos + " has no single stored enchantment");
+                problem = firstProblem(problem, "Enchanted book item frame at " + framePos + " has no readable enchantment. Full ItemStack: " + item + "; data components: " + item.getDataComponents() + "; enchantments: " + storedEnchantmentEntries(item));
                 continue;
             }
             var outputChest = findContainerBelow(framePos);
@@ -1013,12 +1153,26 @@ public class VillagerTrader extends Module {
             }
             var lampLit = findRedstoneLampAbove(framePos);
             if (lampLit == null) noLampFrames++;
-            outputFrames.add(new OutputScan(itemName, enchantment, outputChest, lampLit));
+            var professions = isEnchantedBook
+                ? Set.of(VillagerProfession.LIBRARIAN)
+                : VILLAGER_SELLABLE_OUTPUTS.entrySet().stream()
+                    .filter(entry -> entry.getValue().contains(itemName))
+                    .map(Map.Entry::getKey)
+                    .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+            if (professions.isEmpty()) {
+                ignored++;
+                continue;
+            }
+            for (var profession : professions) {
+                outputFrames.add(new OutputScan(itemName, profession, enchantment, outputChest, lampLit));
+            }
         }
         if (input1Chest == null) {
             return new ScanResult(outputFrames.size(), 0, 0, ignored, skipped, noLampFrames,
                 firstProblem(problem, "No emerald item frame attached to a container was found"));
         }
+        var previousTrades = new LinkedHashMap<>(PLUGIN_CONFIG.trades);
+        var reconciledTrades = new LinkedHashMap<String, VillagerTraderConfig.Trade>();
         for (var output : outputFrames) {
             if (output.enchantment() != null && input2Chest == null) {
                 skipped++;
@@ -1026,17 +1180,30 @@ public class VillagerTrader extends Module {
                 continue;
             }
             var input2 = output.enchantment() == null ? null : input2Chest;
-            var existing = findExistingTrade(output);
-            if (existing != null) {
-                applyScannedTrade(existing, output, input1Chest, input2);
-                updated++;
-                continue;
+            var existingEntry = previousTrades.entrySet().stream()
+                .filter(entry -> entry.getValue().villagerProfession == output.profession())
+                .filter(entry -> sameScannedOutput(entry.getValue(), output))
+                .findFirst()
+                .orElse(null);
+            if (existingEntry == null) {
+                var legacyCandidates = previousTrades.entrySet().stream()
+                    .filter(entry -> sameScannedOutput(entry.getValue(), output))
+                    .toList();
+                if (legacyCandidates.size() == 1) existingEntry = legacyCandidates.getFirst();
             }
-            var trade = new VillagerTraderConfig.Trade();
+            var trade = existingEntry == null ? new VillagerTraderConfig.Trade() : existingEntry.getValue();
             applyScannedTrade(trade, output, input1Chest, input2);
-            PLUGIN_CONFIG.trades.put(uniqueScannedTradeId(output), trade);
-            generated++;
+            var id = uniqueScannedTradeId(output, reconciledTrades);
+            reconciledTrades.put(id, trade);
+            if (existingEntry == null) generated++;
+            else {
+                updated++;
+                previousTrades.remove(existingEntry.getKey());
+            }
         }
+        // The scan owns the full trade list. Entries not represented by a current frame are stale.
+        PLUGIN_CONFIG.trades.clear();
+        PLUGIN_CONFIG.trades.putAll(reconciledTrades);
         if (generated > 0 || updated > 0) {
             tradeIterator.refresh();
         }
@@ -1045,6 +1212,7 @@ public class VillagerTrader extends Module {
 
     private void applyScannedTrade(VillagerTraderConfig.Trade trade, OutputScan output, BlockPos input1Chest, @Nullable BlockPos input2Chest) {
         var enchantment = output.enchantment();
+        trade.villagerProfession = output.profession();
         trade.outputItem = output.itemName();
         trade.outputChest = output.containerPos();
         trade.inputItem1 = ItemRegistry.EMERALD.name();
@@ -1055,40 +1223,39 @@ public class VillagerTrader extends Module {
                 trade.inputItem2Chest = input2Chest;
             }
             trade.outputItemEnchantments.clear();
-            trade.outputItemEnchantments.put(enchantment.name(), enchantment.level());
+            trade.outputItemEnchantments.put(enchantment.key(), enchantment.level());
+            trade.maxInput1PerTrade = PLUGIN_CONFIG.maxEmeraldCostForEnchantedBook;
         }
         if (output.lampLit() != null) {
             trade.enabled = output.lampLit();
         }
     }
 
-    private VillagerTraderConfig.@Nullable Trade findExistingTrade(OutputScan output) {
+    private boolean sameScannedOutput(VillagerTraderConfig.Trade trade, OutputScan output) {
+        if (!trade.outputItem.equals(output.itemName())) return false;
         var enchantment = output.enchantment();
-        for (var trade : PLUGIN_CONFIG.trades.values()) {
-            if (!trade.outputItem.equals(output.itemName())) continue;
-            if (enchantment == null) return trade;
-            if (trade.outputItemEnchantments.size() != 1) continue;
-            if (trade.outputItemEnchantments.getInt(enchantment.name()) != enchantment.level()) continue;
-            return trade;
-        }
-        return null;
+        if (enchantment == null) return trade.outputItemEnchantments.isEmpty();
+        return trade.outputItemEnchantments.size() == 1
+            && trade.outputItemEnchantments.getInt(enchantment.key()) == enchantment.level();
     }
 
-    private String uniqueScannedTradeId(OutputScan output) {
+    private String uniqueScannedTradeId(OutputScan output, Map<String, VillagerTraderConfig.Trade> currentScan) {
         var enchantment = output.enchantment();
-        String id = output.itemName();
+        String lowerCase = output.profession().name().toLowerCase(Locale.ROOT);
+        String id = output.itemName() + "_" + lowerCase;
         if (enchantment != null) {
-            id = enchantment.name();
-            for (var trade : PLUGIN_CONFIG.trades.values()) {
-                if (trade.outputItem.equals(output.itemName()) && trade.outputItemEnchantments.containsKey(enchantment.name())) {
-                    id = enchantment.name() + "_" + enchantment.level();
+            var enchantmentName = enchantment.name().startsWith("lore:") ? enchantment.name().substring("lore:".length()) : enchantment.name();
+            id = enchantmentName + "_" + enchantment.level();
+            for (var trade : currentScan.values()) {
+                if (trade.outputItem.equals(output.itemName()) && trade.outputItemEnchantments.containsKey(enchantment.key())) {
+                    id = output.itemName() + "_" + lowerCase + "_" + enchantmentName + "_" + enchantment.level();
                     break;
                 }
             }
         }
         var base = id;
         int suffix = 1;
-        while (PLUGIN_CONFIG.trades.containsKey(id)) {
+        while (currentScan.containsKey(id)) {
             id = base + "_" + (++suffix);
         }
         return id;
@@ -1140,18 +1307,58 @@ public class VillagerTrader extends Module {
         var components = item.getDataComponents();
         if (components == null) return null;
         var stored = components.get(DataComponentTypes.STORED_ENCHANTMENTS);
-        if (stored == null || stored.getEnchantments().size() != 1) return null;
-        var entry = stored.getEnchantments().int2IntEntrySet().iterator().next();
+        var direct = components.get(DataComponentTypes.ENCHANTMENTS);
+        var enchantmentComponent = stored != null && !stored.getEnchantments().isEmpty() ? stored : direct;
+        if (enchantmentComponent == null || enchantmentComponent.getEnchantments().isEmpty()) {
+            var loreEnchant = loreEnchantment(components.toString());
+            return loreEnchant == null ? null : new DisplayedEnchantment("lore:" + loreEnchant.name(), loreEnchant.level(), -1);
+        }
+        var entries = enchantmentComponent.getEnchantments().int2IntEntrySet();
+        // Cross-version servers can deliver extra/unmapped entries alongside a newer enchantment.
+        // Prefer an entry the 1.21.4 client does not know, which is the likely custom/new enchantment.
+        var entry = entries.stream()
+            .filter(candidate -> EnchantmentRegistry.REGISTRY.get(candidate.getIntKey()) == null)
+            .findFirst()
+            .orElseGet(() -> entries.size() == 1 ? entries.iterator().next() : null);
+        if (entry == null) return null;
         var enchantment = EnchantmentRegistry.REGISTRY.get(entry.getIntKey());
-        return enchantment == null ? null : new DisplayedEnchantment(enchantment.name(), entry.getIntValue());
+        var name = enchantment == null ? "registry:" + entry.getIntKey() : enchantment.name();
+        return new DisplayedEnchantment(name, entry.getIntValue(), entry.getIntKey());
+    }
+
+    private @Nullable LoreEnchantment loreEnchantment(String componentDump) {
+        var nameMatcher = java.util.regex.Pattern.compile("key=enchantment\\.minecraft\\.([a-z0-9_.-]+)").matcher(componentDump);
+        var customNameMatcher = java.util.regex.Pattern.compile("key=([A-Z][a-zA-Z0-9_]+)").matcher(componentDump);
+        var levelMatcher = java.util.regex.Pattern.compile("key=enchantment\\.level\\.(\\d+)").matcher(componentDump);
+        String name = nameMatcher.find() ? nameMatcher.group(1) : customNameMatcher.find() ? customNameMatcher.group(1).toLowerCase(Locale.ROOT) : null;
+        if (name == null || !levelMatcher.find()) return null;
+        return new LoreEnchantment(name, Integer.parseInt(levelMatcher.group(1)));
+    }
+
+    private String storedEnchantmentEntries(ItemStack item) {
+        var components = item.getDataComponents();
+        if (components == null) return "<no data components>";
+        var stored = components.get(DataComponentTypes.STORED_ENCHANTMENTS);
+        var direct = components.get(DataComponentTypes.ENCHANTMENTS);
+        var storedEntries = stored == null ? "<missing>" : stored.getEnchantments().int2IntEntrySet().stream()
+            .map(entry -> entry.getIntKey() + "=" + entry.getIntValue())
+            .collect(java.util.stream.Collectors.joining(", ", "[", "]"));
+        var directEntries = direct == null ? "<missing>" : direct.getEnchantments().int2IntEntrySet().stream()
+            .map(entry -> entry.getIntKey() + "=" + entry.getIntValue())
+            .collect(java.util.stream.Collectors.joining(", ", "[", "]"));
+        return "stored_enchantments=" + storedEntries + ", enchantments=" + directEntries;
     }
 
     private static String firstProblem(String current, String message) {
         return current == null ? message : current;
     }
 
-    private record DisplayedEnchantment(String name, int level) {}
-    private record OutputScan(String itemName, @Nullable DisplayedEnchantment enchantment, BlockPos containerPos, @Nullable Boolean lampLit) {}
+    private record DisplayedEnchantment(String name, int level, int registryId) {
+        private String key() { return name.startsWith("registry:") ? name : name; }
+    }
+    private record LoreEnchantment(String name, int level) {}
+    private record OutputScan(String itemName, VillagerProfession profession, @Nullable DisplayedEnchantment enchantment, BlockPos containerPos, @Nullable Boolean lampLit) {}
+    private record QueuedTrade(int offerIndex, VillagerTraderConfig.Trade config) {}
     public record ScanResult(int outputFrames, int generated, int updated, int ignored, int skipped, int noLampFrames, @Nullable String problem) {}
 
     private void stop() {
@@ -1187,13 +1394,57 @@ public class VillagerTrader extends Module {
             .build());
     }
 
-    private Optional<EntityLiving> nextVillager(final VillagerTraderConfig.Trade trade) {
-        return CACHE.getEntityCache().getEntities().values().stream()
+    private Optional<EntityLiving> nextVillager() {
+        var entities = CACHE.getEntityCache().getEntities().values();
+        var enabledProfessions = EnumSet.noneOf(VillagerProfession.class);
+        for (var enabledTrade : tradeIterator.backingArray) {
+            enabledProfessions.add(enabledTrade.villagerProfession);
+        }
+        if (enabledProfessions.isEmpty()) return Optional.empty();
+        if (activeVillagerUuid != null) {
+            var active = entities.stream()
+                .filter(e -> activeVillagerUuid.equals(e.getUuid()) && e.getEntityType() == EntityType.VILLAGER)
+                .map(e -> (EntityLiving) e)
+                .filter(e -> enabledProfessions.contains(getVillagerProfession(e)) && hasAdjacentWorkstation(e))
+                .findFirst();
+            if (active.isPresent()) return active;
+            activeVillagerUuid = null;
+        }
+        return entities.stream()
             .filter(e -> e.getEntityType() == EntityType.VILLAGER)
+            .filter(e -> e.getUuid() != null)
             .filter(e -> !interactedVillagersCache.asMap().containsKey(e.getUuid()))
             .map(e -> (EntityLiving) e)
-            .filter(e -> trade.villagerProfession == getVillagerProfession(e))
+            .filter(e -> enabledProfessions.contains(getVillagerProfession(e)))
+            .filter(this::hasAdjacentWorkstation)
             .min(Comparator.comparingDouble(e -> e.distanceSqTo(CACHE.getPlayerCache().getThePlayer())));
+    }
+
+    private boolean hasAdjacentWorkstation(EntityLiving villager) {
+        String workstation = switch (getVillagerProfession(villager)) {
+            case ARMORER -> "blast_furnace";
+            case BUTCHER -> "smoker";
+            case CARTOGRAPHER -> "cartography_table";
+            case CLERIC -> "brewing_stand";
+            case FARMER -> "composter";
+            case FISHERMAN -> "barrel";
+            case FLETCHER -> "fletching_table";
+            case LEATHERWORKER -> "cauldron";
+            case LIBRARIAN -> "lectern";
+            case MASON -> "stonecutter";
+            case SHEPHERD -> "loom";
+            case TOOLSMITH -> "smithing_table";
+            case WEAPONSMITH -> "grindstone";
+            default -> null;
+        };
+        if (workstation == null) return false;
+        var pos = villager.blockPos();
+        return List.of(
+            new BlockPos(pos.x() + 1, pos.y(), pos.z()), new BlockPos(pos.x() - 1, pos.y(), pos.z()),
+            new BlockPos(pos.x(), pos.y(), pos.z() + 1), new BlockPos(pos.x(), pos.y(), pos.z() - 1)
+        ).stream().anyMatch(blockPos -> World.isChunkLoadedBlockPos(blockPos.x(), blockPos.z())
+            && World.getBlock(blockPos) != null
+            && World.getBlock(blockPos).name().equals(workstation));
     }
 
     private VillagerProfession getVillagerProfession(EntityLiving villager) {
@@ -1290,11 +1541,11 @@ public class VillagerTrader extends Module {
             boolean villagerTradeHasInput2 = villagerTrade.getSecondInput() != Container.EMPTY_STACK;
             if (offerHasInput2 && villagerTradeHasInput2) {
                 if (villagerTrade.getSecondInput().getId() == offer.getSecondInput().getId()) {
-                    if (!configTrade.outputItemEnchantments.isEmpty() && !sameEnchantedBook(villagerTrade.getOutput(), offer.getOutput())) continue;
+                    if (!configTrade.outputItemEnchantments.isEmpty() && sameEnchantedBook(villagerTrade.getOutput(), offer.getOutput())) continue;
                     count++;
                 }
             } else if (!offerHasInput2 && !villagerTradeHasInput2) {
-                if (!configTrade.outputItemEnchantments.isEmpty() && !sameEnchantedBook(villagerTrade.getOutput(), offer.getOutput())) continue;
+                if (!configTrade.outputItemEnchantments.isEmpty() && sameEnchantedBook(villagerTrade.getOutput(), offer.getOutput())) continue;
                 count++;
             }
         }
@@ -1306,9 +1557,9 @@ public class VillagerTrader extends Module {
         var bData = b.getDataComponents();
         var aEA = aData != null ? aData.get(DataComponentTypes.STORED_ENCHANTMENTS) : null;
         var bEA = bData != null ? bData.get(DataComponentTypes.STORED_ENCHANTMENTS) : null;
-        if (aEA == null) return bEA == null;
-        if (bEA == null) return false;
-        return aEA.getEnchantments().equals(bEA.getEnchantments());
+        if (aEA == null) return bEA != null;
+        if (bEA == null) return true;
+        return !aEA.getEnchantments().equals(bEA.getEnchantments());
     }
 
     private boolean canShiftClickPurchase(VillagerTrade villagerTrade) {
@@ -1327,8 +1578,7 @@ public class VillagerTrader extends Module {
             }
 
         }
-        if (count > 1) return false;
-        return true;
+        return count <= 1;
     }
 
     private IntList findEmptySlots() {

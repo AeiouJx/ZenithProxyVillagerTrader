@@ -14,6 +14,7 @@ public class VillagerTraderConfig {
     public boolean enabled = false;
     public long waitForInteractTimeoutTicks = 20L;
     public boolean logTradeStatusToDiscord = false;
+    public int maxEmeraldCostForEnchantedBook = 64;
     public int itemFrameScanHorizontalRangeBlocks = 32;
     public int itemFrameScanVerticalRangeBlocks = 8;
 
